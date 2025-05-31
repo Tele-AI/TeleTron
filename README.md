@@ -13,9 +13,10 @@ TeleTron
 
 ## ⏱️Speed Benchmark 
 
-- HunyuanVideo Training Throughput
+| HunyuanVideo Training Throughput | Max Training Frames  |
+|:---:|:---:|
+| <img src="assets/efficiency.png" width="400" alt="Training Efficiency"> | <img src="assets/efficiency_max_training_frames.png" width="400" alt="Max Training Frames"> |
 
-![image-20250516015939057](assets/efficiency.png)
 
 ## 📖Introduction
 
