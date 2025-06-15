@@ -4,7 +4,7 @@
 TeleTron
 ===========================
 
-<h4>To pioneer training long-context multi-modal transformer models</h4>
+<h4>To Pioneer Long-Context Multi-Modal Transformer Training</h4>
 
 [![version](https://img.shields.io/badge/release-0.1.0-green)](./setup.py)
 [![license](https://img.shields.io/badge/license-Apache2.0-blue)](./LICENSE)
@@ -13,25 +13,27 @@ TeleTron
 
 ## ⏱️Speed Benchmark 
 
-| HunyuanVideo Training Throughput | Max Training Frames  |
+| High Training Throughput | Long Training Contexts  |
 |:---:|:---:|
 | <img src="assets/efficiency.png" width="400" alt="Training Efficiency"> | <img src="assets/efficiency_max_training_frames.png" width="400" alt="Max Training Frames"> |
 
+^ Experiments conducted on HunyuanVideo model training using the first released version (2025/05/16).
+
 ## 🔥News
 
-- **2025/6/13**: TeleTron supports distributed multimodal encoders for hunyuanvideo models!
-- **2025/5/16**: TeleTron first release with code for HunyuanVideo full-finetuning and inference!
+- **2025/06/13**: TeleTron accelerates HunyuanVideo training by 30%+ by Distributed Multi-Modal Encoders!
+- **2025/05/16**: TeleTron first release with code for HunyuanVideo full-parameter training and inference! [[Zhihu]](https://zhuanlan.zhihu.com/p/1907030055512671098) [[WeChat]](https://mp.weixin.qq.com/s/Ie1NulNlUmzqSCRCFAXy7Q)
 
 ## 📖Introduction
 
 TeleTron features flexible parallel strategy and fused cuda kernels to best facilitate **long-context**, **efficient** and **flexible** training of multi-modal transformer models.
 
-* Long-Context
-  * TeleTron leverages mixed parallel strategy, activation checkpointing and fused cuda kernels at the same time to optimize GPU memory usage, so as to train [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) with more than 30s 720P video clips.
-* Efficient
-  * With fused cuda kernels, TeleTron facilitates faster training than general training optimization libraries like [DeepSpeed](https://github.com/deepspeedai/DeepSpeed).
-* Flexible
-  * Training with a variety of video sequence length and model size, TeleTron supports flexible adjustment of parallel strategy among data parallel, context parallel, and/or tensor parallel.
+* 📜 **Long-Context Training**</br>
+  TeleTron leverages mixed parallel strategy, activation checkpointing and fused cuda kernels at the same time to optimize GPU memory usage, so as to train [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) with more than 30 seconds of video clips in 720P.
+* 🚀 **Efficient at Scale**</br>
+  Through CUDA optimization and distributed training techniques, TeleTron can achieve higher throughput than general Transformer training frameworks, especially at a large scale.
+* 🛠️ **Flexible in Application**</br>
+  Training with a variety of video sequence length and model size, TeleTron supports flexible adjustment of parallel strategy among data parallel, context parallel, and/or tensor parallel.
 
 TeleTron has released code for HunyuanVideo I2V fine-tuning and has been supporting **[TeleAI VAST](https://arxiv.org/abs/2412.16677v1)** (Video As Storyboard from Text) on high-resolution video generation training (code to be released). 
 
