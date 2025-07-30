@@ -13,11 +13,11 @@ TeleTron
 
 ## ⏱️Speed Benchmark 
 
-| High Training Throughput | Long Training Contexts  |
-|:---:|:---:|
-| <img src="assets/efficiency.png" width="400" alt="Training Efficiency"> | <img src="assets/efficiency_max_training_frames.png" width="400" alt="Max Training Frames"> |
 
-^ Experiments conducted on HunyuanVideo model training using the first released version (2025/05/16).
+![graph](ComparativeGraph.jpg)
+
+
+^ Experiments conducted on Wan2.1 model training using the latest version of TeleTron (2025/07/29).
 
 ## 🔥News
 - **2025/07/15**: TeleTron supports Wan-2.1 i2v training!
