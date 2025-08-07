@@ -86,7 +86,7 @@ class CheckPointMixin:
 
         # Collect args, model, RNG.
         if not torch.distributed.is_initialized() \
-                or mpu.get_data_modulo_expert_parallel_rank() == 0 \
+                or mpu.get_data_parallel_rank(with_context_parallel=True) == 0 \
                 or args.use_dist_ckpt:
 
             optim_sd_kwargs = {}
@@ -305,7 +305,10 @@ class CheckPointMixin:
                 sys.exit()
         else:
             if (args.fp16 or args.bf16) and optimizer is not None:
-                optimizer.reload_model_params()
+                if args.use_zero2:
+                    optimizer.refresh_fp32_params()
+                else:
+                    optimizer.reload_model_params()
 
         # rng states.
         if not release and not args.finetune and not args.no_load_rng:
@@ -419,6 +422,7 @@ class CheckPointMixin:
         """
         #import ipdb; ipdb.set_trace()
         # Read the tracker file and set the iteration.
+        args = get_args()
         tracker_filename = get_checkpoint_tracker_filename(load_dir)
 
         # If no tracker file, return nothing
@@ -445,7 +449,8 @@ class CheckPointMixin:
         assert is_dist_ckpt == False, ("Zero2 optimizer not support dist ckpt format!")
         
         model_checkpoint_name = get_checkpoint_name(load_dir, iteration, release, return_base_dir=False)
-        optimizer_state_dict_names = get_checkpoint_name(load_dir, iteration, release, return_base_dir=False, use_zero2=True)
+        if not release and not args.no_load_optim:
+            optimizer_state_dict_names = get_checkpoint_name(load_dir, iteration, release, return_base_dir=False, use_zero2=True)
 
         dist_infix = "distributed " if is_dist_ckpt else ""
         if release:
@@ -455,7 +460,8 @@ class CheckPointMixin:
         # Load the checkpoint.
         try:
             state_dict = torch.load(model_checkpoint_name, map_location='cpu', weights_only=False)
-            self.load_zero2_optimizer(optimizer_state_dict_names, state_dict)
+            if not release and not args.no_load_optim:
+                self.load_zero2_optimizer(optimizer_state_dict_names, state_dict)
         except ModuleNotFoundError:
             # from megatron.legacy.fp16_deprecated import loss_scaler
             # For backward compatibility.
@@ -465,7 +471,8 @@ class CheckPointMixin:
                 'megatron.legacy.fp16_deprecated.loss_scaler']
             sys.modules['megatron.model'] = sys.modules['megatron.legacy.model']
             state_dict = torch.load(model_checkpoint_name, map_location='cpu', weights_only=False)
-            self.load_zero2_optimizer(optimizer_state_dict_names, state_dict)
+            if not release and not args.no_load_optim:
+                self.load_zero2_optimizer(optimizer_state_dict_names, state_dict)
             sys.modules.pop('fp16.loss_scaler', None)
             sys.modules.pop('megatron.fp16.loss_scaler', None)
             sys.modules.pop('megatron.model', None)

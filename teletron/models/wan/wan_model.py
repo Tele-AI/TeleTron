@@ -51,7 +51,7 @@ def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads
         q = rearrange(q, "b s (n d) -> b s n d", n=num_heads)
         k = rearrange(k, "b s (n d) -> b s n d", n=num_heads)
         v = rearrange(v, "b s (n d) -> b s n d", n=num_heads)
-        x = flash_attn_interface.flash_attn_func(q, k, v)
+        x = flash_attn_interface.flash_attn_func(q, k, v)[0]
         x = rearrange(x, "b s n d -> b s (n d)", n=num_heads)
     elif FLASH_ATTN_2_AVAILABLE:
         q = rearrange(q, "b s (n d) -> b s n d", n=num_heads)
@@ -85,17 +85,9 @@ def sinusoidal_embedding_1d(dim, position):
     return x.to(position.dtype)
 
 
-def precompute_freqs_cis_3d(dim: int, end: int = 1024, theta: float = 10000.0):
-    # 3d rope precompute
-    f_freqs_cis = precompute_freqs_cis(dim - 2 * (dim // 3), end, theta)
-    h_freqs_cis = precompute_freqs_cis(dim // 3, end, theta)
-    w_freqs_cis = precompute_freqs_cis(dim // 3, end, theta)
-    return f_freqs_cis, h_freqs_cis, w_freqs_cis
-
-
-def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0):
+def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0, device="cuda"):
     # 1d rope precompute
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device)
                    [: (dim // 2)].double() / dim))
     freqs = torch.outer(torch.arange(end, device=freqs.device), freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
@@ -290,7 +282,6 @@ class WanModel(torch.nn.Module):
         self.freq_dim = wan_config.freq_dim
         self.eps = wan_config.eps
         self.patch_size = wan_config.patch_size
-        self.has_image_input = wan_config.has_image_input
         self.has_image_pos_emb = wan_config.has_image_pos_emb
 
         # config
@@ -298,6 +289,10 @@ class WanModel(torch.nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_layers = config.num_layers
 
+        #args
+        from teletron.utils import get_args
+        args = get_args()
+        self.has_image_input = args.has_image_input
         self.patch_embedding = nn.Conv3d(
             self.in_dim, self.dim, kernel_size=self.patch_size, stride=self.patch_size)
         self.text_embedding = nn.Sequential(
@@ -317,8 +312,6 @@ class WanModel(torch.nn.Module):
             for _ in range(self.num_layers)
         ])
         self.head = Head(self.dim, self.out_dim, self.patch_size, self.eps)
-        head_dim = self.dim // self.num_heads
-        self.freqs = precompute_freqs_cis_3d(head_dim)
 
         if self.has_image_input:
             self.img_emb = MLP(1280, self.dim, has_pos_emb=self.has_image_pos_emb)  # clip_feature_dim = 1280
@@ -352,8 +345,10 @@ class WanModel(torch.nn.Module):
         t_mod = self.time_projection(t).unflatten(1, (6, self.dim))
         context = self.text_embedding(context)
         
-        if self.has_image_input:
+        if y is not None:
             x = torch.cat([x, y], dim=1)  # (b, c_x + c_y, f, h, w)
+
+        if self.has_image_input:
             clip_embdding = self.img_emb(clip_feature)
             context = torch.cat([clip_embdding, context], dim=1)
         
@@ -362,11 +357,11 @@ class WanModel(torch.nn.Module):
         
         x, (f, h, w) = self.patchify(x)
         
-        freqs = torch.cat([
-            self.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ], dim=-1).reshape(f * h * w, 1, -1).to(x.device)
+        head_dim = self.dim // self.num_heads
+        freq_f = precompute_freqs_cis(head_dim - 2 * (head_dim // 3), f).view(f, 1, 1, -1).expand(f, h, w, -1)
+        freq_h = precompute_freqs_cis(head_dim // 3, h).view(1, h, 1, -1).expand(f, h, w, -1)
+        freq_w = precompute_freqs_cis(head_dim // 3, w).view(1, 1, w, -1).expand(f, h, w, -1)
+        freqs = torch.cat([freq_f, freq_h, freq_w], dim=-1).reshape(f * h * w, 1, -1).to(x.device)
         
         def create_custom_forward(module):
             def custom_forward(*inputs):

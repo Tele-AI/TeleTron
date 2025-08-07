@@ -15,7 +15,7 @@ TeleTron
 
 | High Training Throughput | Long Training Contexts  |
 |:---:|:---:|
-| <img src="assets/efficiency.png" width="400" alt="Training Efficiency"> | <img src="assets/efficiency_max_training_frames.png" width="400" alt="Max Training Frames"> |
+| <img src="assets/efficiency.jpg" width="400" alt="Training Efficiency"> | <img src="assets/efficiency_max_training_frames.png" width="400" alt="Max Training Frames"> |
 
 ^ Experiments conducted on HunyuanVideo model training using the first released version (2025/05/16).
 

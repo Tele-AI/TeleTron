@@ -556,8 +556,11 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                         opt_param_scheduler,
                         config)
             
-            if grad_norm is None and not args.use_zero2:
-                grad_norm = get_grad_norm(optimizer)
+            if grad_norm is None:
+                if args.use_zero2:
+                    grad_norm = optimizer._global_grad_norm
+                else:
+                    grad_norm = get_grad_norm(optimizer)
                 
             if os.environ.get("MEMORY_SNAPSHOT"):
                 time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime())
@@ -698,9 +701,6 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                 data_iterator=data_iterator,
                 model=model,
                 num_microbatches=get_num_microbatches(),
-                seq_length=args.seq_length,
-                micro_batch_size=args.micro_batch_size,
-                decoder_seq_length=args.decoder_seq_length,
                 forward_only=False,
                 zero_optimizer=optimizer)
         else:
