@@ -15,6 +15,7 @@ TP=1
 CP=2
 MBS=1
 
+N_MOE=1
 N_LAYERS=20
 N_GPU_FOR_TRAIN=4
 N_GPU_FOR_DATA=1
@@ -27,6 +28,31 @@ NODE_RANK=${RANK:-'0'}
 GPUS_PER_NODE=$(echo $CUDA_VISIBLE_DEVICES | awk -F"," '{print NF}')
 
 
+
+if [ $N_MOE -eq 1 ]; then
+    MOE_ARGS=(
+        --moe-step-factor-list 0.0 
+        --moe-step-factor-list 1.0 
+    )
+elif [ $N_MOE -eq 2 ]; then
+    MOE_ARGS=(
+        --moe-step-factor-list 0.0 
+        --moe-step-factor-list 0.833 
+        --moe-step-factor-list 1.0
+    )
+elif [ $N_MOE -eq 4 ]; then
+    MOE_ARGS=(
+        --moe-step-factor-list 0.0 
+        --moe-step-factor-list 0.625 
+        --moe-step-factor-list 0.833
+        --moe-step-factor-list 0.937 
+        --moe-step-factor-list 1.0
+    )
+else
+    echo "N_MOE must be 1, 2 or 4"
+    exit 1
+fi
+
 DISTRIBUTED_ARGS=(
     --nproc_per_node $GPUS_PER_NODE 
     --nnodes $NNODES 
@@ -35,14 +61,8 @@ DISTRIBUTED_ARGS=(
     --master_port $MASTER_PORT
 )
 
-MOE_ARGS=(
-    --moe-step-factor-list 0.0 
-    --moe-step-factor-list 1.0 
-)
-
 GPT_MODEL_ARGS=(
     --num-layers $N_LAYERS
-    --has-image-input
     --hidden-size 5120        
     --num-attention-heads 40
     --seq-length 512          
@@ -77,7 +97,7 @@ MODEL_PARALLEL_ARGS=(
     --context-parallel-size ${CP}
     --distributed-vae
     --distributed-vae-world-size $N_GPU_FOR_DATA
-    --consumer-models-num 1
+    --consumer-models-num $N_MOE
 )
 
 DATA_ARGS=(
@@ -99,7 +119,7 @@ EVAL_AND_LOGGING_ARGS=(
 )
 
 
-torchrun ${DISTRIBUTED_ARGS[@]} examples/wan/pretrain_wan.py \
+torchrun ${DISTRIBUTED_ARGS[@]} examples/wan/pretrain_wan2_2.py \
     ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
@@ -107,4 +127,4 @@ torchrun ${DISTRIBUTED_ARGS[@]} examples/wan/pretrain_wan.py \
     ${DATA_ARGS[@]}    \
     ${EVAL_AND_LOGGING_ARGS[@]} \
     ${LORA_CFG[@]} \
-    "$@" 2>&1 | tee wan.log
+    "$@" 2>&1 | tee wan2_2.log

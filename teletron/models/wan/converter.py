@@ -216,7 +216,21 @@ class WanModelStateDictConverter:
                 "eps": 1e-6,
                 "has_image_pos_emb": False
             }
-        # litian add
+        elif hash_state_dict_keys(state_dict) == "5b013604280dd715f8457c6ed6d6a626":
+            config = {
+                "has_image_input": False,
+                "patch_size": [1, 2, 2],
+                "in_dim": 36,
+                "dim": 5120,
+                "ffn_dim": 13824,
+                "freq_dim": 256,
+                "text_dim": 4096,
+                "out_dim": 16,
+                "num_heads": 40,
+                "num_layers": 40,
+                "eps": 1e-6,
+                "has_image_pos_emb": False
+            }
         elif hash_state_dict_keys(state_dict) == "83412a0551cf730c434f92be218ae526":
             config = {
                 "num_layers": 25,

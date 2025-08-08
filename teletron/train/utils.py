@@ -410,9 +410,6 @@ def deepspeed_forward_backward(
     data_iterator,
     model,
     num_microbatches,
-    seq_length,
-    micro_batch_size,
-    decoder_seq_length,
     forward_only,
     zero_optimizer,
 ):
@@ -1374,6 +1371,8 @@ def _add_network_size_args(parser):
                        dest='bert_binary_head')
     group.add_argument('--untie-embeddings-and-output-weights', action='store_true',
                        help='Untie embeddings and output weights.'),
+    group.add_argument("--has-image-input", action='store_true',
+                       help='If set, use image input in model')
     return parser
 
 
