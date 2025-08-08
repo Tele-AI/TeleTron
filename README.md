@@ -18,6 +18,7 @@ TeleTron
 | <img src="assets/efficiency.png" width="400" alt="Training Efficiency"> | <img src="assets/efficiency_max_training_frames.png" width="400" alt="Max Training Frames"> |
 
 Left: Experiments conducted on Wan2.1 model training using the latest version (2025/07/15).
+
 Right: Experiments conducted on HunyuanVideo model training using the first released version (2025/05/16).
 
 ## 🔥News
