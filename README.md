@@ -15,11 +15,13 @@ TeleTron
 
 | High Training Throughput | Long Training Contexts  |
 |:---:|:---:|
-| <img src="assets/efficiency.jpg" width="400" alt="Training Efficiency"> | <img src="assets/efficiency_max_training_frames.png" width="400" alt="Max Training Frames"> |
+| <img src="assets/efficiency.png" width="400" alt="Training Efficiency"> | <img src="assets/efficiency_max_training_frames.png" width="400" alt="Max Training Frames"> |
 
-^ Experiments conducted on HunyuanVideo model training using the first released version (2025/05/16).
+Left: Experiments conducted on Wan2.1 model training using the latest version (2025/07/15).
+Right: Experiments conducted on HunyuanVideo model training using the first released version (2025/05/16).
 
 ## 🔥News
+- **2025/08/7**: TeleTron supports Wan-2.2 training!
 - **2025/07/15**: TeleTron supports Wan-2.1 i2v training!
 - **2025/06/13**: TeleTron accelerates HunyuanVideo training by 30%+ by Distributed Multi-Modal Encoders!
 - **2025/05/16**: TeleTron first release with code for HunyuanVideo full-parameter training and inference! [[Zhihu]](https://zhuanlan.zhihu.com/p/1907030055512671098) [[WeChat]](https://mp.weixin.qq.com/s/Ie1NulNlUmzqSCRCFAXy7Q)
