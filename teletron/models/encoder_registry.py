@@ -1,13 +1,16 @@
-# Copyright (c) 2025 TeleAI-infra Team. All rights reserved.
-
+from abc import ABC, abstractmethod
 import torch
 from typing import Dict, Any, Type
 from teletron.core.distributed.base_encoder import BaseEncoder
+from teletron.models.teleai.teleai_encoder import TeleaiEncoder
 from teletron.models.wan.encoder.wan_encoder import WanVideoEncoder
+from teletron.models.longcat_video.encoder.longcat_video_encoder import LongcatVideoEncoder
 
 
 _ENCODER_REGISTRY: Dict[str, Type[BaseEncoder]] = {}
+_ENCODER_REGISTRY["teleai_encoder"] = TeleaiEncoder
 _ENCODER_REGISTRY["wan_encoder"] = WanVideoEncoder
+_ENCODER_REGISTRY["longcat_encoder"] = LongcatVideoEncoder
 
 def register_encoder(name: str):
     """
@@ -46,12 +49,3 @@ def get_encoder(name: str, device: torch.device, **kwargs: Any) -> BaseEncoder:
     
     encoder_class = _ENCODER_REGISTRY[name]
     return encoder_class(device=device, **kwargs)
-
-model_mapping = {
-    "parallelwanmodel": "wan_encoder",
-    "wanmodel": "wan_encoder",
-}
-
-def get_encoder_name(key):
-    return model_mapping.get(key.lower(), "unknown_encoder")
-    

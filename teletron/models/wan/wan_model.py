@@ -26,20 +26,6 @@ except ModuleNotFoundError:
     
 T5_CONTEXT_TOKEN_NUMBER = 512   
 
-class WanParams:
-    hidden_size: int = 5120
-    in_channels: int = 36
-    out_channels: int = 16
-    text_dim: int = 4096
-    freq_dim: int = 256
-    ffn_dim: int = 13824
-    eps: float = 1e-6
-    patch_size: Tuple[int, int, int] = (1,2,2)
-    num_attention_heads: int = 40
-    num_layers: int = 3
-    has_image_input: bool = True
-    has_image_pos_emb: bool = False
-
 def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, compatibility_mode=False):
     if compatibility_mode:
         q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
@@ -85,9 +71,17 @@ def sinusoidal_embedding_1d(dim, position):
     return x.to(position.dtype)
 
 
-def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0, device="cuda"):
+def precompute_freqs_cis_3d(dim: int, end: int = 1024, theta: float = 10000.0):
+    # 3d rope precompute
+    f_freqs_cis = precompute_freqs_cis(dim - 2 * (dim // 3), end, theta)
+    h_freqs_cis = precompute_freqs_cis(dim // 3, end, theta)
+    w_freqs_cis = precompute_freqs_cis(dim // 3, end, theta)
+    return f_freqs_cis, h_freqs_cis, w_freqs_cis
+
+
+def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0):
     # 1d rope precompute
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device)
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)
                    [: (dim // 2)].double() / dim))
     freqs = torch.outer(torch.arange(end, device=freqs.device), freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
@@ -271,28 +265,35 @@ class Head(nn.Module):
 
 
 class WanModel(torch.nn.Module):
-    def __init__(self, config):
+    def __init__(
+        self, 
+        dim: int,
+        in_dim: int,
+        ffn_dim: int,
+        out_dim: int,
+        text_dim: int,
+        freq_dim: int,
+        eps: float,
+        patch_size: Tuple[int, int, int],
+        num_heads: int,
+        num_layers: int,
+        has_image_input: bool,
+        has_image_pos_emb: bool
+    ):
         super().__init__()
-        # wan_config
-        wan_config = WanParams()
-        self.in_dim = wan_config.in_channels
-        self.ffn_dim = wan_config.ffn_dim
-        self.out_dim = wan_config.out_channels
-        self.text_dim = wan_config.text_dim
-        self.freq_dim = wan_config.freq_dim
-        self.eps = wan_config.eps
-        self.patch_size = wan_config.patch_size
-        self.has_image_pos_emb = wan_config.has_image_pos_emb
-
-        # config
-        self.dim = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.num_layers = config.num_layers
-
-        #args
-        from teletron.utils import get_args
-        args = get_args()
-        self.has_image_input = args.has_image_input
+        self.dim = dim
+        self.in_dim = in_dim
+        self.ffn_dim = ffn_dim
+        self.out_dim = out_dim
+        self.text_dim = text_dim
+        self.freq_dim = freq_dim
+        self.eps = eps
+        self.patch_size = patch_size
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.has_image_input = has_image_input
+        self.has_image_pos_emb = has_image_pos_emb
+        
         self.patch_embedding = nn.Conv3d(
             self.in_dim, self.dim, kernel_size=self.patch_size, stride=self.patch_size)
         self.text_embedding = nn.Sequential(
@@ -312,6 +313,8 @@ class WanModel(torch.nn.Module):
             for _ in range(self.num_layers)
         ])
         self.head = Head(self.dim, self.out_dim, self.patch_size, self.eps)
+        head_dim = self.dim // self.num_heads
+        self.freqs = precompute_freqs_cis_3d(head_dim)
 
         if self.has_image_input:
             self.img_emb = MLP(1280, self.dim, has_pos_emb=self.has_image_pos_emb)  # clip_feature_dim = 1280
@@ -357,11 +360,11 @@ class WanModel(torch.nn.Module):
         
         x, (f, h, w) = self.patchify(x)
         
-        head_dim = self.dim // self.num_heads
-        freq_f = precompute_freqs_cis(head_dim - 2 * (head_dim // 3), f).view(f, 1, 1, -1).expand(f, h, w, -1)
-        freq_h = precompute_freqs_cis(head_dim // 3, h).view(1, h, 1, -1).expand(f, h, w, -1)
-        freq_w = precompute_freqs_cis(head_dim // 3, w).view(1, 1, w, -1).expand(f, h, w, -1)
-        freqs = torch.cat([freq_f, freq_h, freq_w], dim=-1).reshape(f * h * w, 1, -1).to(x.device)
+        freqs = torch.cat([
+            self.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+            self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+        ], dim=-1).reshape(f * h * w, 1, -1).to(x.device)
         
         def create_custom_forward(module):
             def custom_forward(*inputs):

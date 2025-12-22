@@ -10,7 +10,6 @@ import numpy as np
 from einops import rearrange
 
 from torchvision.transforms.functional import to_pil_image
-from diffusers.utils import SAFETENSORS_WEIGHTS_NAME, WEIGHTS_NAME
 
 
 def encode_prompt(prompter,prompt, positive=True):
@@ -42,7 +41,7 @@ def encode_image(
     msk = msk.view(1, msk.shape[1] // 4, 4, height // 8, width // 8) # 1, 21, 4, 56, 98
     msk = msk.transpose(1, 2)[0]
     vae_input = torch.concat(
-        [image.transpose(0, 1), torch.zeros(3, num_frames - 1, height, width).to(image.device)],
+        [image.transpose(0, 1), torch.zeros((3, num_frames - 1, height, width), device=image.device)],
         dim=1,
     )
     y = vae.encode(
@@ -299,28 +298,6 @@ def get_device():
     else:
         device = torch.device("cpu")
     return device
-
-
-def load_state_dict(weight_path):
-    if os.path.isdir(weight_path):
-        if os.path.exists(os.path.join(weight_path, WEIGHTS_NAME)):
-            return torch.load(
-                os.path.join(weight_path, WEIGHTS_NAME), map_location="cpu"
-            )
-        elif os.path.exists(os.path.join(weight_path, SAFETENSORS_WEIGHTS_NAME)):
-            return safetensors.torch.load_file(
-                os.path.join(weight_path, SAFETENSORS_WEIGHTS_NAME), device="cpu"
-            )
-        else:
-            assert False
-    elif os.path.isfile(weight_path):
-        if weight_path.endswith(".safetensors"):
-            return safetensors.torch.load_file(weight_path, device="cpu")
-        else:
-            return torch.load(weight_path, map_location="cpu")
-    else:
-        assert False
-
 
 def save_state_dict(state_dict, save_path):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)

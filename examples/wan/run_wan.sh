@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Runs the "7B" parameter model
+# Runs the "175B" parameter model
 export PYTHONUNBUFFERED=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NVTE_FUSED_ATTN=0
@@ -8,13 +8,17 @@ export NVTE_FLASH_ATTN=1
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-ENCODER_MODEL_PATH=<Specify path>
-ENCODER_TOKENIZER_PATH=<Specify path to file>/google/umt5-xxl
+ENCODER_MODEL_PATH=/workspace/Wan2___1-I2V-14B-480P
+ENCODER_TOKENIZER_PATH=/workspace/Wan2___1-I2V-14B-480P/google/umt5-xxl
+MERGE_FILE=/nvfile-heatstorage/teleai-infra/wxe/Megatron-LM/data/gpt_2_merge.txt
+DATA_PATH=./checkpoint
+CONFIG_PATH=config.prone10_lowerlr.config
 
 TP=1
 CP=2
 MBS=1
 
+N_MOE=1
 N_LAYERS=20
 N_GPU_FOR_TRAIN=4
 N_GPU_FOR_DATA=1
@@ -24,8 +28,36 @@ MASTER_ADDR=${MASTER_ADDR:-'127.0.0.1'}
 MASTER_PORT='11220'
 NNODES=${WORLD_SIZE:-'1'}
 NODE_RANK=${RANK:-'0'}
+
+
+N_GPU=$((N_GPU_FOR_TRAIN+N_GPU_FOR_DATA))
+WORLD_SIZE=$N_GPU_FOR_TRAIN
+GBS=$(($WORLD_SIZE*$MBS/$CP/$TP))
 GPUS_PER_NODE=$(echo $CUDA_VISIBLE_DEVICES | awk -F"," '{print NF}')
 
+if [ $N_MOE -eq 1 ]; then
+    MOE_ARGS=(
+        --moe-step-factor-list 0.0 
+        --moe-step-factor-list 1.0 
+    )
+elif [ $N_MOE -eq 2 ]; then
+    MOE_ARGS=(
+        --moe-step-factor-list 0.0 
+        --moe-step-factor-list 0.833 
+        --moe-step-factor-list 1.0
+    )
+elif [ $N_MOE -eq 4 ]; then
+    MOE_ARGS=(
+        --moe-step-factor-list 0.0 
+        --moe-step-factor-list 0.625 
+        --moe-step-factor-list 0.833
+        --moe-step-factor-list 0.937 
+        --moe-step-factor-list 1.0
+    )
+else
+    echo "N_MOE must be 1, 2 or 4"
+    exit 1
+fi
 
 DISTRIBUTED_ARGS=(
     --nproc_per_node $GPUS_PER_NODE 
@@ -35,14 +67,9 @@ DISTRIBUTED_ARGS=(
     --master_port $MASTER_PORT
 )
 
-MOE_ARGS=(
-    --moe-step-factor-list 0.0 
-    --moe-step-factor-list 1.0 
-)
-
 GPT_MODEL_ARGS=(
-    --num-layers $N_LAYERS
     --has-image-input
+    --num-layers $N_LAYERS
     --hidden-size 5120        
     --num-attention-heads 40
     --seq-length 512          
@@ -77,15 +104,16 @@ MODEL_PARALLEL_ARGS=(
     --context-parallel-size ${CP}
     --distributed-vae
     --distributed-vae-world-size $N_GPU_FOR_DATA
-    --consumer-models-num 1
+    --consumer-models-num $N_MOE
 )
-
 DATA_ARGS=(
-    --dataset-type FakeDataset
+    --dataset-type VastDataset
+    --data-path $DATA_PATH 
+    --merge-file $MERGE_FILE 
     --split 949,50,1
     --dataloader-type single
     --num-workers 1
-    --num-frames 9
+    --config-path ${CONFIG_PATH}
 )
 
 EVAL_AND_LOGGING_ARGS=(
@@ -107,4 +135,4 @@ torchrun ${DISTRIBUTED_ARGS[@]} examples/wan/pretrain_wan.py \
     ${DATA_ARGS[@]}    \
     ${EVAL_AND_LOGGING_ARGS[@]} \
     ${LORA_CFG[@]} \
-    "$@" 2>&1 | tee wan.log
+    "$@" | tee wan.log

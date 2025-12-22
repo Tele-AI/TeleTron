@@ -1,5 +1,3 @@
-# Copyright (c) 2025 TeleAI-infra Team. All rights reserved.
-
 import torch 
 import torch.nn as nn
 from megatron.core import mpu 

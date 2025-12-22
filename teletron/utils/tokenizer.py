@@ -1,5 +1,3 @@
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
-
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 import sys
@@ -689,7 +687,7 @@ class _BertWordPieceTokenizer(MegatronTokenizer):
 
     def __init__(self, vocab_file, lower_case=True, vocab_extra_ids=0):
         super().__init__(vocab_file, lower_case=lower_case, vocab_extra_ids=vocab_extra_ids)
-        self.tokenizer = FullTokenizer(vocab_file, do_lower_case=lower_case)
+        self.tokenizer = FullBertTokenizer(vocab_file, do_lower_case=lower_case)
         self.cls_id = self.tokenizer.vocab['[CLS]']
         self.sep_id = self.tokenizer.vocab['[SEP]']
         self.pad_id = self.tokenizer.vocab['[PAD]']

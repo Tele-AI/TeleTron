@@ -16,7 +16,7 @@ def read_requirements():
 
 
 setup(
-    name="unit_tests",
+    name="unit_test",
     version="0.1.0",
     description="To pioneer training long-context multi-modal transformer models",
     long_description=read_readme(),
@@ -24,7 +24,7 @@ setup(
     author="TeleAI-Infra Team",
     url="https://github.com/Tele-AI/TeleTron.git",
     install_requires=read_requirements(),
-    packages=find_packages(include=['unit_tests*']),
+    packages=find_packages(include=['teletron*']),
     package_data={"teletron": ["**/*.yml", "**/*.sh"]},
     classifiers=[
         "Development Status :: 3 - Alpha",

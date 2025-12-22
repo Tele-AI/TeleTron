@@ -254,17 +254,3 @@ class WanTextEncoder(torch.nn.Module):
         x = self.dropout(x)
         return x
     
-    @staticmethod
-    def state_dict_converter():
-        return WanTextEncoderStateDictConverter()
-    
-    
-class WanTextEncoderStateDictConverter:
-    def __init__(self):
-        pass
-
-    def from_diffusers(self, state_dict):
-        return state_dict
-    
-    def from_civitai(self, state_dict):
-        return state_dict

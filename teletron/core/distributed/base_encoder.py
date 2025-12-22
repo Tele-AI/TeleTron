@@ -1,5 +1,3 @@
-# Copyright (c) 2025 TeleAI-infra Team. All rights reserved.
-
 from abc import ABC, abstractmethod
 import torch
 from typing import Dict, Any, Tuple, List
@@ -62,7 +60,6 @@ class BaseEncoder(ABC):
     def _pack_tensors(tensors_to_pack: List[torch.Tensor], dtype=torch.bfloat16) -> torch.Tensor:
         """
         将一个张量列表展平并拼接成一个单一的扁平化张量。
-        这是一个辅助函数，可以在具体实现中被调用。
         """
         if not tensors_to_pack:
             return torch.tensor([])
@@ -74,7 +71,6 @@ class BaseEncoder(ABC):
     def _get_tensors_size(tensor_list: List[torch.Tensor], device: torch.device) -> torch.Tensor:
         """
         获取张量列表的形状信息，并将其作为一个整数张量返回。
-        这是一个辅助函数，可以在具体实现中被调用。
         """
         size_info = ()
         for item in tensor_list:

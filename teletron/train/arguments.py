@@ -1,5 +1,3 @@
-# Copyright (c) 2025 TeleAI-infra Team and Nvidia Megatron-LM Team. All rights reserved.
-
 from dataclasses import dataclass, field, fields
 import dataclasses
 from typing import Optional, Union, get_type_hints, get_origin, get_args
@@ -17,8 +15,6 @@ from teletron.train.utils import (
     _add_validation_args,
     _add_data_args,
     _add_autoresume_args,
-    _add_biencoder_args,
-    _add_vision_args,
     _add_moe_args,
     _add_logging_args,
     _add_inference_args,
@@ -35,10 +31,6 @@ class UnifiedArguments:
 
     timers: Optional[bool] = field(default=None)
 
-    dataset_type: str = field(
-        default="VastDataset",
-        metadata={"help": "Type of dataset to use"}
-    )
     data_path: str = field(
         default="./checkpoint",
         metadata={"help": "Path to the dataset"}
@@ -111,6 +103,7 @@ class UnifiedArguments:
     context_parallel_size: int = field(default=1,)
     distributed_vae: bool = field(default=False,)
     distributed_vae_world_size: int = field(default=1,)
+    producer_batch_size: int = field(default=1,)
     consumer_models_num: int = field(default=1,)
     encoder_dtype: str = field(
         default='bfloat16',
@@ -161,28 +154,23 @@ class UnifiedArguments:
         metadata={"help": "Type of task"}
     )
     split: str = field(default="")
-    dataloader_type: str = field(default="single")
     num_workers: int = field(default=1)
     num_frames: int = field(
         default=9,
         metadata={
             "help":"numbers of frames to train, must be of 4n+1."\
-                    "Overloads yaml if using koala dataset. Example:45"
+                    "Example:45"
         }
     )
     video_resolution: tuple[int, int] = field(
         default=(1280,720),
         metadata={
-            "help":"video resolution to train, overloads yaml if using koala dataset."\
+            "help":"video resolution to train."\
                    "Example: 1280,720 (comma-separated)"
         }
     )
-    koala_opt: str = field(
-        default="/teletron/datasets/koala_cfg/koala.yml",
-        metadata={
-            "help":"If DATASET_TYPE is KoalaDataset then need the koala dataset option file",
-        }
-    )
+
+
 
 
 
@@ -289,8 +277,6 @@ def parse_args(extra_args=None):
     parser = _add_validation_args(parser)
     parser = _add_data_args(parser)
     parser = _add_autoresume_args(parser)
-    parser = _add_biencoder_args(parser)
-    parser = _add_vision_args(parser)
     parser = _add_moe_args(parser)
     parser = _add_logging_args(parser)
     parser = _add_inference_args(parser)

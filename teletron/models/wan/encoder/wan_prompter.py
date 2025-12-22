@@ -7,7 +7,6 @@ import string
 import regex as re
 from transformers import AutoTokenizer
 
-from .base_prompter import BasePrompter
 from .wan_video_text_encoder import WanTextEncoder
 
 def basic_clean(text):
@@ -83,10 +82,9 @@ class HuggingfaceTokenizer:
         return text
 
 
-class WanPrompter(BasePrompter):
+class WanPrompter():
 
     def __init__(self, tokenizer_path=None, text_len=512):
-        super().__init__()
         self.text_len = text_len
         self.text_encoder = None
         self.fetch_tokenizer(tokenizer_path)
@@ -99,7 +97,6 @@ class WanPrompter(BasePrompter):
         self.text_encoder = text_encoder
 
     def encode_prompt(self, prompt, positive=True, device="cuda"):
-        prompt = self.process_prompt(prompt, positive=positive)
         # self.text_encoder.to(device)
         ids, mask = self.tokenizer(prompt, return_mask=True, add_special_tokens=True)
         ids = ids.to(device)
@@ -107,5 +104,5 @@ class WanPrompter(BasePrompter):
         seq_lens = mask.gt(0).sum(dim=1).long()
         prompt_emb = self.text_encoder(ids, mask)
         for i, v in enumerate(seq_lens):
-            prompt_emb[:, v:] = 0
+            prompt_emb[i, v:] = 0
         return prompt_emb

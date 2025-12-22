@@ -1,10 +1,96 @@
-# Copyright (c) 2025 TeleAI-infra Team and Nvidia Megatron-LM Team. All rights reserved.
+# Copyright (c) 2025 TeleAI-infra and Nvidia Megatron-LM Team. All rights reserved.
+
+
+from typing import Optional, List, Any
 
 import torch
-
-from typing import Optional, List
-
 import torch.distributed as dist
+from torch import Tensor
+from megatron.core import mpu
+
+
+ALL_TO_ALL_BUFFER = None
+
+def set_global_all_to_all_buffer(buffer_numel):
+    global ALL_TO_ALL_BUFFER
+    cp_size = mpu.get_context_parallel_world_size()
+    # define all_to_all input buffer
+    buffer_numel = buffer_numel // cp_size
+    ALL_TO_ALL_BUFFER = [torch.zeros(buffer_numel, device=torch.cuda.current_device(), dtype=torch.bfloat16) for _ in range(cp_size)]
+
+def get_all_to_all_buffer(loca_input):
+    global ALL_TO_ALL_BUFFER
+    # resize ALL_TO_ALL_BUFFER
+    cp_size = mpu.get_context_parallel_world_size()
+    input_numel = loca_input.numel() // cp_size
+    if input_numel > ALL_TO_ALL_BUFFER[0].numel():
+        ALL_TO_ALL_BUFFER = None
+        ALL_TO_ALL_BUFFER = [torch.zeros(input_numel, device=torch.cuda.current_device(), dtype=torch.bfloat16) for _ in range(cp_size)]
+    all_to_all_buffer = [t[:input_numel] for t in ALL_TO_ALL_BUFFER]
+    return all_to_all_buffer
+
+
+class SeqAllToAll(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx: Any,
+        group: dist.ProcessGroup,
+        local_input: Tensor,
+        scatter_dim: int,
+        gather_dim: int,
+        use_buffer: bool = False,
+        async_op: bool = False,
+    ) -> Tensor:
+        ctx.group = group
+        ctx.scatter_dim = scatter_dim
+        ctx.gather_dim = gather_dim
+        ctx.async_op = async_op
+        ctx.use_buffer = use_buffer
+        return all_to_all_tensor(local_input, scatter_dim, gather_dim, use_buffer, group, async_op)
+
+    @staticmethod
+    def backward(ctx: Any, *grad_output: Tensor) -> tuple[None, Tensor, None, None]:
+        input_t = torch.cat(grad_output[1:], dim=ctx.gather_dim).contiguous() if ctx.async_op else grad_output[0]
+        return (
+            None,
+            all_to_all_tensor(input_t, ctx.gather_dim, ctx.scatter_dim, ctx.use_buffer, ctx.group, False),
+            None,
+            None,
+            None,
+            None,
+        )
+
+def all_to_all_tensor(
+    local_input: Tensor,
+    scatter_dim: int,
+    gather_dim: int,
+    use_buffer: bool,
+    group: Optional[dist.ProcessGroup] = None,
+    async_op: bool = False,
+):
+    group = mpu.get_context_parallel_group() if group is None else group
+    cp_size = dist.get_world_size(group)
+    input_shape = list(local_input.shape)
+    input_shape[scatter_dim] = input_shape[scatter_dim] // cp_size
+
+    if use_buffer:
+        all_to_all_buffer = get_all_to_all_buffer(local_input)
+        all_to_all_input = list(torch.tensor_split(local_input, cp_size, scatter_dim))
+        input_list = [a.copy_(b.reshape(-1)) for a,b in zip(all_to_all_buffer, all_to_all_input)]
+    else:
+        input_list = [t.contiguous() for t in torch.tensor_split(local_input, cp_size, scatter_dim)]
+    
+    # 创建输出buffer
+    output_list = [torch.empty(input_shape, device=torch.cuda.current_device(), dtype=torch.bfloat16) for _ in range(cp_size)]
+    comm = dist.all_to_all(output_list, input_list, group=group, async_op=async_op)
+    if async_op:
+
+        def wait():
+            comm.wait()
+            return torch.cat(output_list, dim=gather_dim).contiguous()
+
+        return wait
+    return torch.cat(output_list, dim=gather_dim).contiguous()
 
 def split_forward_gather_backward(
     input_: torch.Tensor,
@@ -216,7 +302,8 @@ def _gather(input_: torch.Tensor,
         return input_
 
     input_ = input_.contiguous()
-
+    tensor_shape_base = list(input_.size())
+    assert input_.device.type == "cuda"
     # Prepare the output list with appropriate shapes
     if gather_sizes:
         tensor_list = []
@@ -225,12 +312,11 @@ def _gather(input_: torch.Tensor,
             tensor_shape = list(tensor_shape_base)
             tensor_shape[dim] = gather_sizes[i]
             tensor_list.append(torch.empty(tensor_shape, dtype=input_.dtype, device=input_.device))
+            torch.distributed.all_gather(tensor_list, input_, group=pg)
+            output = torch.cat(tensor_list, dim=dim)
     else:
-        tensor_list = [torch.empty_like(input_, dtype=input_.dtype, device=input_.device) for _ in range(world_size)]
+        tensor_shape_base[dim] = tensor_shape_base[dim] * world_size
+        output = torch.empty(tensor_shape_base, dtype=input_.dtype, device=input_.device)
+        torch.distributed._all_gather_base(output, input_, group=pg)
 
-    assert input_.device.type == "cuda"
-    torch.distributed.all_gather(tensor_list, input_, group=pg)
-
-    # concat
-    output = torch.cat(tensor_list, dim=dim).contiguous()
-    return output
+    return output.contiguous()

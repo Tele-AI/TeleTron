@@ -1,9 +1,7 @@
-# Copyright (c) 2025 TeleAI-infra Team, DeepSpeed Team and Nvidia Megatron-LM Team. All rights reserved.
-
 import math
 from typing import Callable, List, Optional
-import torch
-
+from teletron.utils import print_rank_0, get_args, get_num_microbatches
+from teletron.train.utils import update_train_iters
 from megatron.core import mpu
 from megatron.core.optimizer import (
     OptimizerConfig,
@@ -18,10 +16,7 @@ from apex.optimizers import FusedSGD as SGD
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils.timer import NoopTimer
 
-
-from teletron.utils import print_rank_0, get_args, get_num_microbatches
-from teletron.train.utils import update_train_iters
-
+import torch
 from logging import getLogger
 
 logger = getLogger(__name__)
@@ -101,9 +96,9 @@ class OptimizerParamScheduler(object):
         """Learning rate decay functions from:
               https://openreview.net/pdf?id=BJYwwY9ll pg. 4"""
 
-        max_lr = param_group.get('max_lr', self.max_lr)
-        min_lr = param_group.get('min_lr', self.min_lr)
-
+        max_lr = self.max_lr 
+        min_lr = self.min_lr
+        
         # Use linear warmup for the initial part.
         if self.lr_warmup_steps > 0 and self.num_steps <= self.lr_warmup_steps:
             return (
@@ -415,8 +410,6 @@ class SchedulerMixin:
                 round_robin_gradients=False,
                 has_moe_layers=False,
                 fp16_master_weights_and_gradients=False,
-                gradient_accumulation_dtype=torch.bfloat16,
-                communication_data_type=torch.bfloat16,
                 elastic_checkpoint=False,)
         return optimizer
 
