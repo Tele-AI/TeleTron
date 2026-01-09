@@ -1,7 +1,9 @@
-# Copyright (c) 2025 TeleAI-infra Team. All rights reserved.
 
+from abc import abstractmethod
 import torch
+import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
+# from megatron.core.tensor_parallel import checkpoint
 
 class TransformerGeneralMixin:
     def enable_activation_offload(self, blocks):
@@ -26,10 +28,8 @@ class TransformerGeneralMixin:
         self.recompute_num_layers = args.recompute_num_layers
         blocks.forward = self.checkpointed_forward_transformer_blocks(blocks)
 
+    # todo: kwargs are not updated
     def checkpointed_forward_transformer_blocks(self, blocks):
-        """
-        Wrap transformer blocks with checkpointed function to recompute the blocks in backward
-        """
         def wrap_blocks(*args):
             if self.recompute_granularity == "full"  and self.training:
                 output = self._checkpointed_forward(blocks, *args)
@@ -95,5 +95,5 @@ class TransformerGeneralMixin:
 
         return output 
 
-    def set_input_tensor(self, tensor):
+    def set_input_tensor(self, x):
         return None

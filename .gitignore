@@ -1,3 +1,4 @@
+*.pt
 *.pickle
 __pycache__
 *.so
@@ -13,7 +14,15 @@ ckpt
 ckpt*
 *.log
 *.pyc
-__pycache__/*
+__pycache__/**.png
 debug/
 .venv
 checkpoint/*
+results/*
+examples/teleai/results
+logs*
+profile
+.ipynb_checkpoints
+logs/*
+experiment/*
+*.json

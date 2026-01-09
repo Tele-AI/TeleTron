@@ -62,9 +62,9 @@ def parallel_wan_model_testing(rank, world_size, q, mock_teletron):
     # from tensorwatch import watch_module_forward_backward, TensorWatch
     # watch_module_forward_backward(parallel_wan_model)
 
-    input_dict = torch.load("./wan_inputs.pt", map_location=f"cuda:{rank}")
+    input_dict = torch.load("/nvfile-heatstorage/teleai-infra/litian/teletron-refactor/test/test_data/transformer_inputs.pt", map_location=f"cuda:{rank}")
     wan_model_output = wan_model(**input_dict)
-    input_dict = torch.load("./wan_inputs.pt", map_location=f"cuda:{rank}")
+    input_dict = torch.load("/nvfile-heatstorage/teleai-infra/litian/teletron-refactor/test/test_data/transformer_inputs.pt", map_location=f"cuda:{rank}")
     parallel_wan_model_output = parallel_wan_model(**input_dict)
     if is_close_by_normalized_euclid_dist(wan_model_output, parallel_wan_model_output):
         q.put(f"{WAN_MODEL_FWD_SUCCESS} rank{rank}")

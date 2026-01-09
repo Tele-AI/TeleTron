@@ -1,108 +1,185 @@
-# Copyright (c) 2025 TeleAI-infra Team and Nvidia Megatron-LM Team. All rights reserved.
+import copy
+import json
+import os
+import pickle
+import pprint
 
-_GLOBAL_ARGS=None
-_GLOBAL_NUM_MICROBATCHES_CALCULATOR = None
-_GLOBAL_TOKENIZER = None
-_GLOBAL_WANDB_WRITER = None
-_GLOBAL_TENSORBOARD_WRITER = None
-_GLOBAL_TIMERS = None
+import yaml
 
-from megatron.core import Timers
-from teletron.utils.microbatches import build_num_microbatches_calculator
-from teletron.utils.tokenizer import build_tokenizer
+try:
+    from yaml import CDumper as Dumper
+    from yaml import CLoader as Loader
+except ImportError:
+    from yaml import Dumper, Loader
 
-def set_args(args, build_tokenizer=True):
-    assert args is not None
-    global _GLOBAL_ARGS
-    _ensure_var_is_not_initialized(_GLOBAL_ARGS, 'args')
-    _build_num_microbatches_calculator(args)
-    _GLOBAL_ARGS = args
-    if build_tokenizer:
-        _ = _build_tokenizer(args)
-    _set_timers(args)
-    _set_tensorboard_writer(args)
-
-def _build_tokenizer(args):
-    """Initialize tokenizer."""
-    global _GLOBAL_TOKENIZER
-    _ensure_var_is_not_initialized(_GLOBAL_TOKENIZER, 'tokenizer')
-    _GLOBAL_TOKENIZER = build_tokenizer(args)
-    return _GLOBAL_TOKENIZER
-
-def get_timers():
-    """Return timers."""
-    _ensure_var_is_initialized(_GLOBAL_TIMERS, 'timers')
-    return _GLOBAL_TIMERS
-
-def get_tensorboard_writer():
-    """Return tensorboard writer. It can be None so no need
-    to check if it is initialized."""
-    return _GLOBAL_TENSORBOARD_WRITER
-
-def get_wandb_writer():
-    """Return tensorboard writer. It can be None so no need
-    to check if it is initialized."""
-    return _GLOBAL_WANDB_WRITER
-
-def _set_timers(args):
-    """Initialize timers."""
-    global _GLOBAL_TIMERS
-    _ensure_var_is_not_initialized(_GLOBAL_TIMERS, 'timers')
-    _GLOBAL_TIMERS = Timers(args.timing_log_level, args.timing_log_option)
-
-def _set_tensorboard_writer(args):
-    """Set tensorboard writer."""
-    global _GLOBAL_TENSORBOARD_WRITER
-    _ensure_var_is_not_initialized(_GLOBAL_TENSORBOARD_WRITER,
-                                   'tensorboard writer')
-
-    if hasattr(args, 'tensorboard_dir') and \
-       args.tensorboard_dir and args.rank == (args.world_size - 1):
-        try:
-            from torch.utils.tensorboard import SummaryWriter
-            print('> setting tensorboard ...')
-            _GLOBAL_TENSORBOARD_WRITER = SummaryWriter(
-                log_dir=args.tensorboard_dir,
-                max_queue=args.tensorboard_queue_size)
-        except ModuleNotFoundError:
-            print('WARNING: TensorBoard writing requested but is not '
-                  'available (are you using PyTorch 1.1.0 or later?), '
-                  'no TensorBoard logs will be written.', flush=True)
-
-def _build_num_microbatches_calculator(args):
-
-    global _GLOBAL_NUM_MICROBATCHES_CALCULATOR
-    _ensure_var_is_not_initialized(_GLOBAL_NUM_MICROBATCHES_CALCULATOR,
-                                   'num microbatches calculator')
-
-    _GLOBAL_NUM_MICROBATCHES_CALCULATOR = build_num_microbatches_calculator(
-        args)
-
-def get_num_microbatches():
-    return _GLOBAL_NUM_MICROBATCHES_CALCULATOR.get()
+from teletron.datasets.utils import import_function
 
 
-def get_current_global_batch_size():
-    return _GLOBAL_NUM_MICROBATCHES_CALCULATOR.get_current_global_batch_size()
+def load_file(file_path, **kwargs):
+    if file_path.endswith(".pkl") or file_path.endswith(".pickle"):
+        data = pickle.load(open(file_path, "rb"), **kwargs)
+    elif file_path.endswith(".json"):
+        data = json.load(open(file_path, "r"), **kwargs)
+    elif file_path.endswith(".yaml") or file_path.endswith("yml"):
+        kwargs.setdefault("Loader", Loader)
+        data = yaml.load(open(file_path, "r"), **kwargs)
+    else:
+        assert False
+    return data
 
 
-def update_num_microbatches(consumed_samples, consistency_check=True):
-    _GLOBAL_NUM_MICROBATCHES_CALCULATOR.update(consumed_samples,
-                                               consistency_check)
+def save_file(file_path, data, **kwargs):
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    if file_path.endswith(".pkl") or file_path.endswith(".pickle"):
+        pickle.dump(data, open(file_path, "wb"), **kwargs)
+    elif file_path.endswith(".json"):
+        kwargs.setdefault("indent", 4)
+        json.dump(data, open(file_path, "w"), **kwargs)
+    elif file_path.endswith(".yaml") or file_path.endswith("yml"):
+        kwargs.setdefault("Dumper", Dumper)
+        yaml.dump(data, open(file_path, "w"), **kwargs)
+    else:
+        assert False
 
+def set_config():
+    from teletron.utils import get_args
+    import importlib
+    import traceback
+    
+    args = get_args()
+    try:
+        *module_parts, var_name = args.config_path.split('.')
+        module_path = '.'.join(module_parts)
+        
+        # 动态导入模块
+        module = importlib.import_module(module_path)
+        config = getattr(module, var_name)
+    except Exception as e:
+        raise ValueError(f"Failed on load config: {traceback.format_exc()}")
 
-def get_args():
-    """Return arguments."""
-    _ensure_var_is_initialized(_GLOBAL_ARGS, 'args')
-    return _GLOBAL_ARGS
+    config = load_config(config)
+    return config
 
 
 
-def _ensure_var_is_initialized(var, name):
-    """Make sure the input variable is not None."""
-    assert var is not None, '{} is not initialized.'.format(name)
+def load_config(config_or_path):
+    if isinstance(config_or_path, str):
+        if os.path.isdir(config_or_path):
+            config_path = os.path.join(config_or_path, "config.json")
+        else:
+            config_path = config_or_path
+        config = Config.load(config_path)
+    elif isinstance(config_or_path, Config):
+        config = config_or_path
+    elif isinstance(config_or_path, dict):
+        config = Config(config_or_path)
+    else:
+        assert False
+    return config
 
-def _ensure_var_is_not_initialized(var, name):
-    """Make sure the input variable is not None."""
-    assert var is None, '{} is already initialized.'.format(name)
 
+class Config(dict):
+    def __init__(self, d=None, **kwargs):
+        if d is None:
+            d = {}
+        if kwargs:
+            d.update(**kwargs)
+        for k, v in d.items():
+            setattr(self, k, v)
+
+    def _process_value(self, value):
+        assert value is None or isinstance(
+            value, (int, float, bool, str, list, tuple, dict, self.__class__)
+        )
+        if isinstance(value, (list, tuple)):
+            if len(value) > 0 and value[0] == "__tuple__":
+                value = tuple(value[1:])
+            is_tuple = isinstance(value, tuple)
+            value = [
+                self._process_value(x) if isinstance(x, (list, tuple, dict)) else x
+                for x in value
+            ]
+            if is_tuple:
+                value = tuple(value)
+        elif isinstance(value, dict) and not isinstance(value, self.__class__):
+            value = self.__class__(value)
+        return value
+
+    def __setattr__(self, name, value):
+        value = self._process_value(value)
+        super(Config, self).__setattr__(name, value)
+        super(Config, self).__setitem__(name, value)
+
+    __setitem__ = __setattr__
+
+    def __str__(self):
+        return "Config:\n{}".format(self.pretty_text)
+
+    @property
+    def pretty_text(self):
+        return pprint.pformat(self)
+
+    def update(self, e=None, **f):
+        d = e or dict()
+        d.update(f)
+        for k, v in d.items():
+            if hasattr(self, k):
+                force = v.pop("__force__", False) if isinstance(v, dict) else False
+                if isinstance(v, dict) and isinstance(self[k], dict) and not force:
+                    self[k].update(v)
+                else:
+                    setattr(self, k, v)
+            else:
+                setattr(self, k, v)
+        return self
+
+    def pop(self, k, d=None):
+        if hasattr(self, k):
+            delattr(self, k)
+        return super(Config, self).pop(k, d)
+
+    def setdefault(self, k, d=None):
+        if hasattr(self, k):
+            return getattr(self, k)
+        else:
+            setattr(self, k, d)
+            return d
+
+    def copy(self):
+        return copy.deepcopy(self)
+
+    def _to_dict(self, data, tuple_as_list=False):
+        if isinstance(data, (dict, self.__class__)):
+            return {k: self._to_dict(d, tuple_as_list) for k, d in data.items()}
+        elif isinstance(data, (list, tuple)):
+            new_data = [self._to_dict(d, tuple_as_list) for d in data]
+            if isinstance(data, tuple):
+                if tuple_as_list:
+                    new_data = ["__tuple__"] + new_data
+                else:
+                    new_data = tuple(new_data)
+            return new_data
+        else:
+            return data
+
+    def to_dict(self, tuple_as_list=False):
+        return self._to_dict(self, tuple_as_list=tuple_as_list)
+
+    def save(self, filename):
+        tuple_as_list = True if filename.endswith(".json") else False
+        data = self.to_dict(tuple_as_list=tuple_as_list)
+        save_file(filename, data)
+
+    @classmethod
+    def load(cls, filename):
+        if filename.endswith(".config"):
+            config = import_function(filename)
+        elif filename.endswith(".py"):
+            config = import_function(filename[:-3] + "/config", "/")
+        else:
+            config = load_file(filename)
+        return cls(config)
+
+    def merge_from_file(self, filename):
+        self.update(Config.load(filename))
+        return self

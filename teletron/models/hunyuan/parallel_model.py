@@ -1,7 +1,6 @@
-# Copyright (c) 2025 TeleAI-infra Team and The HuggingFace Team. All rights reserved.
-
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from megatron.core import mpu
@@ -12,13 +11,11 @@ from diffusers.utils import (
     scale_lora_layers,
     unscale_lora_layers,
 )
-
 from teletron.core.context_parallel import ContextParallelMixin
 from teletron.core.transformer import TransformerGeneralMixin
 from teletron.core.context_parallel.mappings import split_forward_gather_backward,\
-    gather_forward_split_backward
+    gather_forward_split_backward, SeqAllToAll
 from .model import HunyuanVideoTransformer3DModel
-
 import logging
 
 # Configure logging
@@ -80,10 +77,9 @@ class HunyuanVideoDoubleAttnProcessor2_0:
         # Ulysses Context Parallel AlltoAll of qkv
         cp_group = mpu.get_context_parallel_group()
 
-        from yunchang.comm.all_to_all import SeqAllToAll4D
-        query = SeqAllToAll4D.apply(cp_group, query, 1, 2)
-        key = SeqAllToAll4D.apply(cp_group, key,  1, 2)
-        value = SeqAllToAll4D.apply(cp_group, value,  1, 2)
+        query = SeqAllToAll.apply(cp_group, query, 1, 2)
+        key = SeqAllToAll.apply(cp_group, key,  1, 2)
+        value = SeqAllToAll.apply(cp_group, value,  1, 2)
         query, key ,value = map(
                 lambda x: ContextParallelMixin.remove_pad_for_context_parallel(x, dim=2),
                 [query, key, value]
@@ -114,7 +110,7 @@ class HunyuanVideoDoubleAttnProcessor2_0:
         
         # 6. Output projection
         hidden_states = ContextParallelMixin.pad_for_context_parallel(hidden_states, 1)
-        hidden_states = SeqAllToAll4D.apply(cp_group, hidden_states, 1, 2)
+        hidden_states = SeqAllToAll.apply(cp_group, hidden_states, 1, 2)
         encoder_hidden_states = gather_forward_split_backward(encoder_hidden_states, cp_group, 2)
         
         hidden_states = hidden_states.flatten(2, 3).contiguous()
@@ -177,10 +173,9 @@ class HunyuanVideoSingleAttnProcessor2_0:
         # Ulysses Context Parallel AlltoAll of qkv
         cp_group = mpu.get_context_parallel_group()
 
-        from yunchang.comm.all_to_all import SeqAllToAll4D
-        query = SeqAllToAll4D.apply(cp_group, img_query,  1, 2)
-        key = SeqAllToAll4D.apply(cp_group, img_key, 1, 2)
-        value = SeqAllToAll4D.apply(cp_group, img_value, 1, 2)
+        query = SeqAllToAll.apply(cp_group, img_query,  1, 2)
+        key = SeqAllToAll.apply(cp_group, img_key, 1, 2)
+        value = SeqAllToAll.apply(cp_group, img_value, 1, 2)
 
         added_query = split_forward_gather_backward(txt_query, cp_group, dim=1)
         added_key = split_forward_gather_backward(txt_key, cp_group, dim=1)
@@ -249,8 +244,7 @@ class ParallelHunyuanVideoModel(ContextParallelMixin, TransformerGeneralMixin, H
     def register_cp_grad_reduce_hook(self):
         
         # layers with parallel input sequence need to reduce its param gradient.
-        # list the parameters that needs grad reduce and register tensor grad hook    
-        
+        # list the parameters that needs grad reduce and register tensor grad hook     
         self.wgrad_not_to_reduce =[
                 f"single_transformer_blocks.{i}.norm.linear.weight" for i in range(self.num_single_layers)
             ] + [

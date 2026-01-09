@@ -1,12 +1,9 @@
-# Copyright (c) 2025 TeleAI-infra Team and Nvidia Megatron-LM Team. All rights reserved.
-
-import os
+import torch
 from types import SimpleNamespace
+import os
 from datetime import datetime
 import pathlib
 import subprocess
-
-import torch
 from torch.utils import cpp_extension
 
 # Setting this param to a list has a problem of generating different
@@ -142,8 +139,6 @@ def validate_yaml(args, defaults={}):
         print('using {} for parameters ...'.format(args.model_parallel.params_dtype),
               flush=True)
 
-    if args.dataloader_type is None:
-        args.dataloader_type = 'single'
 
     # Consumed tokens.
     args.consumed_train_samples = 0
@@ -500,10 +495,7 @@ def validate_args(args, defaults={}):
     if args.rank == 0:
         print('using {} for parameters ...'.format(args.params_dtype),
               flush=True)
-
-    if args.dataloader_type is None:
-        args.dataloader_type = 'single'
-
+        
     # Consumed tokens.
     args.consumed_train_samples = 0
     args.consumed_valid_samples = 0
@@ -573,36 +565,10 @@ def validate_args(args, defaults={}):
         else:
             args.ffn_hidden_size = 4 * args.hidden_size
 
-    if args.kv_channels is None:
-        assert args.hidden_size % args.num_attention_heads == 0
-        args.kv_channels = args.hidden_size // args.num_attention_heads
-
-    if args.seq_length is not None:
-        assert args.encoder_seq_length is None
-        args.encoder_seq_length = args.seq_length
-    else:
-        assert args.encoder_seq_length is not None
-        args.seq_length = args.encoder_seq_length
-
-    if args.seq_length is not None:
-        assert args.max_position_embeddings >= args.seq_length
-    if args.decoder_seq_length is not None:
-        assert args.max_position_embeddings >= args.decoder_seq_length
     if args.lr is not None:
         assert args.min_lr <= args.lr
     if args.save is not None:
         assert args.save_interval is not None
-    # Mixed precision checks.
-    if args.fp16_lm_cross_entropy:
-        assert args.fp16, 'lm cross entropy in fp16 only support in fp16 mode.'
-    if args.fp32_residual_connection:
-        assert args.fp16 or args.bf16, \
-            'residual connection in fp32 only supported when using fp16 or bf16.'
-
-    if args.moe_grouped_gemm:
-        assert args.bf16, 'Currently GroupedGEMM for MoE only supports bf16 dtype.'
-        dc = torch.cuda.get_device_capability()
-        assert dc[0] >= 8, "Unsupported compute capability for GroupedGEMM kernels."
 
     if args.weight_decay_incr_style == 'constant':
         assert args.start_weight_decay is None
@@ -721,8 +687,7 @@ def validate_args(args, defaults={}):
         raise RuntimeError('--use-dist-ckpt only support Megatron Core, please add --use-mcore-models.')
 
     if args.use_zero2:
-        assert args.use_distributed_optimizer == False, ("When using DeepspeedZero2, megatron distributed optimizer is not supported.")
-        assert args.use_dist_ckpt == False, ("When using DeepspeedZero2, dist ckpt format is not supported, please set --use-dist-ckpt False.")
+        assert args.use_dist_ckpt == False, ("When using DeepspeedZero2, dist ckpt format is not supported, please set --use-dist-ckpt False")
     # Print arguments.
     _print_args("arguments", args)
 
@@ -829,7 +794,13 @@ def num_floating_point_operations(args, batch_size):
 
 
 def get_model_config(model):
-    return get_attr_wrapped_model(model, 'config', allow_none=False)
+    # # Prefer the megatron/transformer config if the model exposes it
+    # cfg = get_attr_wrapped_model(model, 'parallel_config', allow_none=True)
+    # if cfg is not None:
+    #     return cfg
+    # # Fallback to default 'config' (may be HF FrozenDict on some models)
+    # return get_attr_wrapped_model(model, 'config', allow_none=False)
+    return get_attr_wrapped_model(model, 'config')
 
 
 def print_datetime(string):

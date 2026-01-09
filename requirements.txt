@@ -25,3 +25,4 @@ fvcore~=0.1.5
 attrs==24.2.0
 easydict==1.13
 cattrs==24.1.3
+func_timeout==4.3.5
