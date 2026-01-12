@@ -52,7 +52,7 @@ class DistributedDataParallel(MegatronModule):
     ):
         super().__init__(config=config)
         self.module = module
-
+        self.data_parallel_group = data_parallel_group
         # Set bucket_size to infinity if overlap_grad_reduce is False.
         self.overlap_grad_reduce = overlap_grad_reduce
         self.use_distributed_optimizer = use_distributed_optimizer
@@ -102,8 +102,8 @@ class DistributedDataParallel(MegatronModule):
                     continue
 
                 param_dtype = param.dtype
-                # grad_dtype = torch.float if accumulate_allreduce_grads_in_fp32 else param.dtype
-                grad_dtype = param_dtype
+                grad_dtype = torch.float if accumulate_allreduce_grads_in_fp32 else param.dtype
+                # grad_dtype = param_dtype
                 params = param_and_grad_dtype_to_params.get((param_dtype, grad_dtype), [])
                 params.append(param)
                 param_and_grad_dtype_to_params[(param_dtype, grad_dtype)] = params
@@ -262,13 +262,13 @@ class DistributedDataParallel(MegatronModule):
             if is_expert_parallel:
                 torch.distributed.broadcast(
                     param.data,
-                    src=torch.distributed.get_process_group_ranks(self.expert_data_parallel_group),
+                    src=torch.distributed.get_process_group_ranks(self.expert_data_parallel_group)[0],
                     group=self.expert_data_parallel_group,
                 )
             else:
                 torch.distributed.broadcast(
                     param.data,
-                    src=torch.distributed.get_process_group_ranks(self.data_parallel_group),
+                    src=torch.distributed.get_process_group_ranks(self.data_parallel_group)[0],
                     group=self.data_parallel_group,
                 )
 

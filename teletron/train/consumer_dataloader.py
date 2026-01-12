@@ -1,16 +1,16 @@
-# Copyright (c) 2025 TeleAI-infra Team. All rights reserved.
-
 import torch
 import torch.distributed as dist
 from abc import ABC, abstractmethod
-from megatron.core import mpu
-
-from teletron.utils import get_args
+from megatron.core import mpu, tensor_parallel
+from teletron.utils import (get_args,)
 from teletron.core.parallel_state import get_comm_pair
-from teletron.models.encoder_registry import get_encoder, get_encoder_name
+from teletron.models.wan.encoder.wan_encoder import WanVideoEncoder
+from teletron.models.longcat_video.encoder.longcat_video_encoder import LongcatVideoEncoder
+from teletron.models.teleai.teleai_encoder import TeleaiEncoder, PROPERTY_DIMS
+from teletron.utils import set_config
 
 def unpack_tensors(packed_tensor, intervals, producer_tensors=None):
-    features = tuple([packed_tensor[intervals[i-1]:intervals[i]] for i in range(1, len(intervals))])
+    features = [packed_tensor[intervals[i-1]:intervals[i]] for i in range(1, len(intervals))]
     if producer_tensors is not None:
         assert len(producer_tensors) == len(features)
     return features
@@ -91,6 +91,52 @@ class BaseBatchLoader(ABC):
                     self._broadcast_object(value)
             return batch
 
+class VastDistBatchLoader(BaseBatchLoader):
+
+    def _prepare_batch_on_rank_zero(self):
+        # if self.data_iterator is None:
+        #     return None
+        
+        # 1. 从数据迭代器获取原始数据（如果需要的话）
+        # data = next(self.data_iterator)
+        
+        # 2. 从 producer rank 接收 Tensors
+        # breakpoint()
+        comm_pair = get_comm_pair()
+        args = get_args()
+
+        meta_info = [None]
+        dist.recv_object_list(meta_info, comm_pair.producer)
+        meta_info = meta_info[0]
+
+
+        batch = {}
+        # unpack
+        if args.distributed_vae:
+            intervals = [0]
+            
+            for data_to_get in TeleaiEncoder.get_output_schema():
+                data_size = 1
+                for dim in meta_info[data_to_get]:
+                    data_size *= dim 
+                intervals.append(intervals[-1] + data_size)
+            
+            total_size = intervals[-1]
+            recv_tensor = torch.empty((total_size), device=torch.cuda.current_device(), dtype=torch.bfloat16)
+            dist.recv(recv_tensor, comm_pair.producer, tag=0)
+            unpacked_data = unpack_tensors(recv_tensor, intervals, TeleaiEncoder.get_output_schema())
+
+            for i, data_to_get in enumerate(TeleaiEncoder.get_output_schema()):
+                tensor_shape = meta_info[data_to_get]
+                reshaped_data = unpacked_data[i].view(*tensor_shape)
+                batch[data_to_get] = reshaped_data
+        else:
+            # 如果 distributed_vae 为 False，需要定义相应的行为
+            # 例如，返回空的或默认的 tensors
+            raise NotImplementedError("distributed_vae=False case not implemented in this refactoring.")
+
+        return batch
+
 class WanDistBatchLoader(BaseBatchLoader):
 
     def _prepare_batch_on_rank_zero(self):
@@ -103,92 +149,89 @@ class WanDistBatchLoader(BaseBatchLoader):
         # 2. 从 producer rank 接收 Tensors
         comm_pair = get_comm_pair()
         args = get_args()
-        tensors_info = torch.ones((16), device=torch.cuda.current_device(), dtype=torch.int32)
+        info_size  = sum([PROPERTY_DIMS[data_to_get] for data_to_get in WanVideoEncoder.get_output_schema()])
+        tensors_info = torch.ones((info_size), device=torch.cuda.current_device(), dtype=torch.int32)
         req = dist.irecv(tensors_info, comm_pair.producer)
         req.wait()
 
-        training_step = 1000
-        i_moe = comm_pair.consumer // torch.distributed.get_world_size() 
-        timestep_range = [int(f * training_step) for f in args.moe_step_factor_list][i_moe:i_moe+2] 
-        
-        encoder = get_encoder(name=get_encoder_name(args.model), device=torch.cuda.current_device())
-
+        batch = {}
+        # unpack
         if args.distributed_vae:
-            if args.consumer_models_num == 1:
-                # 计算大小
-                transformer_embedding_size = tensors_info[0] * tensors_info[1] * tensors_info[2]
-                clip_embedding_size = tensors_info[3] * tensors_info[4] * tensors_info[5]
-                first_img_embedding_size = tensors_info[6] * tensors_info[7] * tensors_info[8] * tensors_info[9] * tensors_info[10]
-                video_embedding_size = tensors_info[11] * tensors_info[12] * tensors_info[13] * tensors_info[14] * tensors_info[15]
-                # noise_size = video_embedding_size
-                
-                # 准备接收缓冲区
-                # total_size = transformer_embedding_size + clip_embedding_size + first_img_embedding_size + video_embedding_size + noise_size
-                total_size = transformer_embedding_size + clip_embedding_size + first_img_embedding_size + video_embedding_size
-                recv_tensor = torch.empty((total_size), device=torch.cuda.current_device(), dtype=torch.bfloat16)
-
-                intervals = [0, 
-                            transformer_embedding_size, 
-                            transformer_embedding_size + clip_embedding_size,
-                            transformer_embedding_size + clip_embedding_size + first_img_embedding_size,
-                            transformer_embedding_size + clip_embedding_size + first_img_embedding_size + video_embedding_size,
-                            #  transformer_embedding_size + clip_embedding_size + first_img_embedding_size + video_embedding_size + noise_size
-                            ]
-                # 异步接收并等待
-                req = dist.irecv(recv_tensor, comm_pair.producer, tag=0)
-                req.wait()
-                context, clip_feature, img_y, latents = unpack_tensors(recv_tensor, intervals, encoder.get_output_schema())
-            else:
-                # 计算大小
-                transformer_embedding_size = tensors_info[0] * tensors_info[1] * tensors_info[2]
-                clip_embedding_size = tensors_info[3] * tensors_info[4] * tensors_info[5]
-                first_img_embedding_size = tensors_info[6] * tensors_info[7] * tensors_info[8] * tensors_info[9] * tensors_info[10]
-                video_embedding_size = tensors_info[11] * tensors_info[12] * tensors_info[13] * tensors_info[14] * tensors_info[15]
-                noise_size = video_embedding_size
-                
-                # 准备接收缓冲区
-                total_size = transformer_embedding_size + clip_embedding_size + first_img_embedding_size + video_embedding_size + noise_size
-                # total_size = transformer_embedding_size + clip_embedding_size + first_img_embedding_size + video_embedding_size
-                recv_tensor = torch.empty((total_size), device=torch.cuda.current_device(), dtype=torch.bfloat16)
-
-                intervals = [0, 
-                            transformer_embedding_size, 
-                            transformer_embedding_size + clip_embedding_size,
-                            transformer_embedding_size + clip_embedding_size + first_img_embedding_size,
-                            transformer_embedding_size + clip_embedding_size + first_img_embedding_size + video_embedding_size,
-                             transformer_embedding_size + clip_embedding_size + first_img_embedding_size + video_embedding_size + noise_size
-                            ]
+            start_dim = 0
+            intervals = [0]
             
-                # 异步接收并等待
-                req = dist.irecv(recv_tensor, comm_pair.producer, tag=0)
-                req.wait()
-                context, clip_feature, img_y, latents, noise = unpack_tensors(recv_tensor, intervals, encoder.get_output_schema())
-                noise = noise.view(tensors_info[11], tensors_info[12], tensors_info[13], tensors_info[14], tensors_info[15])
-
-            # 解包并重塑 Tensors
-            # context, clip_feature, img_y, latents, noise = unpack_tensors(recv_tensor, intervals)
+            for data_to_get in WanVideoEncoder.get_output_schema():
+                dims = PROPERTY_DIMS[data_to_get]
+                data_size = 1
+                for dim in tensors_info[start_dim:start_dim + dims].tolist():
+                    data_size *= dim 
+                start_dim += dims
+                intervals.append(intervals[-1] + data_size)
             
-            context = context.view(tensors_info[0], tensors_info[1], tensors_info[2])
-            clip_feature = clip_feature.view(tensors_info[3], tensors_info[4], tensors_info[5])
-            img_y = img_y.view(tensors_info[6], tensors_info[7], tensors_info[8], tensors_info[9], tensors_info[10])
-            latents = latents.view(tensors_info[11], tensors_info[12], tensors_info[13], tensors_info[14], tensors_info[15])
-            # noise = noise.view(tensors_info[11], tensors_info[12], tensors_info[13], tensors_info[14], tensors_info[15])
+            total_size = intervals[-1]
+            recv_tensor = torch.empty((total_size), device=torch.cuda.current_device(), dtype=torch.bfloat16)
+            req = dist.irecv(recv_tensor, comm_pair.producer, tag=0)
+            req.wait()
+            
+            unpacked_data = unpack_tensors(recv_tensor, intervals, WanVideoEncoder.get_output_schema())
+            start_dim = 0
+            for i, data_to_get in enumerate(WanVideoEncoder.get_output_schema()):
+                dims = PROPERTY_DIMS[data_to_get]
+                tensor_shape = tensors_info[start_dim:start_dim + dims].tolist()
+                reshaped_data = unpacked_data[i].view(*tensor_shape)
+                batch[data_to_get] = reshaped_data
+                start_dim += dims
         else:
             # 如果 distributed_vae 为 False，需要定义相应的行为
             # 例如，返回空的或默认的 tensors
             raise NotImplementedError("distributed_vae=False case not implemented in this refactoring.")
 
-        # 3. 构建批次字典
-        batch = {
-            "context": context,
-            "clip_feature": clip_feature,
-            "image_emb_y": img_y,
-            "latents": latents,
-            'timestep_range': timestep_range,
-        }
-        if args.consumer_models_num > 1:
-            batch['noise']=noise
         
+        return batch
+
+class LongcatVideoDistBatchLoader(BaseBatchLoader):
+
+    def _prepare_batch_on_rank_zero(self):
+        # if self.data_iterator is None:
+        #     return None
+        
+        # 1. 从数据迭代器获取原始数据（如果需要的话）
+        # data = next(self.data_iterator)
+        
+        # 2. 从 producer rank 接收 Tensors
+        # breakpoint()
+        comm_pair = get_comm_pair()
+        args = get_args()
+
+        meta_info = [None]
+        dist.recv_object_list(meta_info, comm_pair.producer)
+        meta_info = meta_info[0]
+
+        batch = {}
+        # unpack
+        if args.distributed_vae:
+            intervals = [0]
+            
+            for data_to_get in LongcatVideoEncoder.get_output_schema():
+                data_size = 1
+                for dim in meta_info[data_to_get]:
+                    data_size *= dim 
+                intervals.append(intervals[-1] + data_size)
+            
+            total_size = intervals[-1]
+            recv_tensor = torch.empty((total_size), device=torch.cuda.current_device(), dtype=torch.bfloat16)
+            dist.recv(recv_tensor, comm_pair.producer, tag=0)
+            unpacked_data = unpack_tensors(recv_tensor, intervals, LongcatVideoEncoder.get_output_schema())
+
+            for i, data_to_get in enumerate(LongcatVideoEncoder.get_output_schema()):
+                tensor_shape = meta_info[data_to_get]
+                reshaped_data = unpacked_data[i].view(*tensor_shape)
+                batch[data_to_get] = reshaped_data
+        else:
+            # 如果 distributed_vae 为 False，需要定义相应的行为
+            # 例如，返回空的或默认的 tensors
+            raise NotImplementedError("distributed_vae=False case not implemented in this refactoring.")
+
         return batch
 
 class HunyuanDistBatchLoader(BaseBatchLoader):
@@ -259,17 +302,106 @@ class HunyuanOriginBatchLoader(BaseBatchLoader):
         
         return batch
 
+
+class CausalWanOriginalBatchLoader(BaseBatchLoader):
+    def _prepare_batch_on_rank_zero(self):
+        if self.data_iterator is None:
+            return None
+        
+        try:
+            data = next(self.data_iterator)
+        except StopIteration:
+            raise NotImplementedError("CausalWanModel")
+            return None # 返回 None 以向基类发出迭代结束的信号
+
+        batch = {
+            'latents': data["latents"].cuda(non_blocking=True),
+            'prompt_emb': data["prompt_emb"]['context'].cuda(non_blocking=True),
+            # 'image_emb': data["image_emb"], 
+        }
+        return batch
+
+class CausalWanBatchLoader(BaseBatchLoader):
+    def _prepare_batch_on_rank_zero(self):
+        if self.data_iterator is None:
+            return None
+        
+        try:
+            data = next(self.data_iterator)
+        except StopIteration:
+            raise NotImplementedError("CausalWanModel")
+            return None # 返回 None 以向基类发出迭代结束的信号
+
+        batch = {
+            'latents': data["latents"].cuda(non_blocking=True),
+            'prompt_emb': data["prompt_emb"].cuda(non_blocking=True),
+            'unprompt_emb': data["unprompt_emb"].cuda(non_blocking=True),
+        }
+        return batch
+
+class CausalDistBatchLoader(BaseBatchLoader):
+
+    def _prepare_batch_on_rank_zero(self):
+
+        comm_pair = get_comm_pair()
+        args = get_args()
+
+        meta_info_list = [None]
+        dist.recv_object_list(meta_info_list, comm_pair.producer)
+        meta_info = meta_info_list[0]
+
+        batch = {}
+        
+        if not args.distributed_vae:
+            raise NotImplementedError("CausalDistBatchLoader requires distributed_vae=True.")
+
+        intervals = [0]
+
+        data_keys_to_receive = TeleaiEncoder.get_output_schema()
+
+        for key in data_keys_to_receive:
+            shape = meta_info[key]
+            data_size = 1
+            for dim in shape:
+                data_size *= dim
+            intervals.append(intervals[-1] + data_size)
+
+        total_size = intervals[-1]
+
+        recv_tensor = torch.empty((total_size), device=torch.cuda.current_device(), dtype=torch.bfloat16)
+        dist.recv(recv_tensor, comm_pair.producer, tag=0)
+
+        unpacked_data = unpack_tensors(recv_tensor, intervals, data_keys_to_receive)
+
+        for i, key in enumerate(data_keys_to_receive):
+            tensor_shape = meta_info[key]
+            reshaped_data = unpacked_data[i].view(*tensor_shape)
+            batch[key] = reshaped_data
+
+        return batch
+
 def create_batch_loader(args, data_iterator):
-    model_name_lower = args.model.lower()
+    model_name_lower = set_config().model_config.dit.type.lower()
     is_distributed_vae = args.distributed_vae
 
-    if 'wan' in model_name_lower:
+    if 'teleai' in model_name_lower:
         if is_distributed_vae:
-            print("Info: Creating WanDistBatchLoader.")
+            print("Info: Creating VastDistBatchLoader.")
+            return VastDistBatchLoader(data_iterator)
+        else:
+            raise NotImplementedError("A non-distributed VAE loader for VastModel is not implemented.")
+    elif 'wan' in model_name_lower:
+        if is_distributed_vae:
+            print("Info: Creating VastDistBatchLoader.")
             return WanDistBatchLoader(data_iterator)
         else:
-            raise NotImplementedError("A non-distributed VAE loader for WanModel is not implemented.")
-    
+            raise NotImplementedError("A non-distributed VAE loader for VastModel is not implemented.")        
+    elif 'longcat' in model_name_lower:
+        if is_distributed_vae:
+            print("Info: Creating LongcatVideoDistBatchLoader.")
+            return LongcatVideoDistBatchLoader(data_iterator)
+        else:
+            raise NotImplementedError("A non-distributed VAE loader for LongcatVideoModel is not implemented.")
     elif 'hunyuan' in model_name_lower:
         if is_distributed_vae:
             print("Info: Creating HunyuanDistBatchLoader.")
@@ -277,6 +409,12 @@ def create_batch_loader(args, data_iterator):
         else:
             print("Info: Creating HunyuanOriginBatchLoader.")
             return HunyuanOriginBatchLoader(data_iterator)
-            
+    elif 'causal' in model_name_lower:
+        if is_distributed_vae:
+            print("Info: Creating CausalWanBatchLoader.")
+            return CausalDistBatchLoader(data_iterator)
+        else:
+            print("Info: Creating CausalWanOriginalBatchLoader.")
+            return CausalWanOriginalBatchLoader(data_iterator)
     else:
         raise ValueError(f"Unknown model name '{args.model_name}' for batch loader creation.")

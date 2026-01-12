@@ -45,9 +45,9 @@ def forward_step(data_iterator, model):
     prompt_emb["context"] = batch["context"]
     training_target = flow_scheduler.training_target(latents, noise, timestep)
     image_emb = {}
-    image_emb["y"] = batch["image_emb_y"]
+    image_emb["y"] = batch["img_emb_y"]
     noisy_latents = flow_scheduler.add_noise(latents, noise, timestep)
-    image_emb["clip_feature"] = batch["clip_feature"]
+    image_emb["clip_feature"] = batch["img_clip_feature"]
 
     output_tensor_list = model(x=noisy_latents, 
                                timestep=timestep, 

@@ -1,5 +1,3 @@
-# Copyright (c) 2025 TeleAI-infra Team. All rights reserved.
-
 import re
 import ftfy
 import urllib.parse as ul

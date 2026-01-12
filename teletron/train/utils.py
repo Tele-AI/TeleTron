@@ -1,31 +1,29 @@
-# Copyright (c) 2025 TeleAI-infra Team and Nvidia Megatron-LM Team. All rights reserved.
-
-import time
-import math
-import random
-import contextlib
-import dataclasses
-import numpy as np
-from typing import Optional
-from datetime import timedelta
-
 import torch
-import torch.distributed as dist
-import torch.nn.functional as F
-from megatron.core.jit import jit_fuser
 from megatron.core import mpu, tensor_parallel
 from megatron.core.transformer import TransformerConfig
 from megatron.core.tensor_parallel import param_is_not_tensor_parallel_duplicate
-
-from teletron.train.config import load_config
 from teletron.utils import (get_args,
                             fused_kernel_load,
                             print_rank_0,
+                            print_rank_last,
+                            get_num_microbatches,
                             update_num_microbatches,
                             get_attr_wrapped_model,
                             get_model_config,
+                            get_current_global_batch_size
                             )
-from teletron.utils.config import get_current_global_batch_size
+import time
+import contextlib
+from datetime import timedelta
+from megatron.core.jit import jit_fuser
+import torch.distributed as dist
+from typing import Optional
+import dataclasses
+import torch.nn.functional as F
+import random
+import numpy as np
+from datetime import datetime
+import math
 
 from apex.multi_tensor_apply import multi_tensor_applier
 
@@ -35,6 +33,7 @@ except ImportError:
     amp_C = None
 NUM_BYTES_IN_MEGABYTE = 1024 * 1024
 _TRANSFORMER_MODEL_GROUP = None
+
 
 
 def report_memory(name):
@@ -368,6 +367,7 @@ def get_transformer_model_group(check_initialized=True):
         assert (
             _TRANSFORMER_MODEL_GROUP is not None
         ), 'tensor context parallel group is not initialized'
+    # print("get transformer blocks: ", dist.get_rank(_TRANSFORMER_MODEL_GROUP))
     if dist.get_rank(_TRANSFORMER_MODEL_GROUP) == -1:
         return None
     
@@ -376,7 +376,21 @@ def get_transformer_model_group(check_initialized=True):
 def get_batch(data_iterator):
     # get batches based on the TP_CP rank you are on
     batch = get_batch_on_this_tp_cp_rank_vast(data_iterator)
+    # batch = get_batch_on_this_tp_rank_vast(data_iterator)
     return batch
+
+def flow_loss_func(output_tensor):
+    """Loss function."""
+    loss = output_tensor[0].mean()
+    averaged_loss = average_losses_across_data_parallel_group([loss])
+    loss = loss.unsqueeze(0)
+
+    loss_wo_w = output_tensor[1].mean()
+    averaged_loss_wo_w  = average_losses_across_data_parallel_group([loss_wo_w])
+    loss_wo_w = loss_wo_w.unsqueeze(0)
+    
+    return loss, {"loss": averaged_loss[0], "loss_wo_w": averaged_loss_wo_w[0]}
+
 
 def loss_func(output_tensor):
     """Loss function."""
@@ -387,7 +401,20 @@ def loss_func(output_tensor):
     loss_wo_w = output_tensor[1].mean()
     averaged_loss_wo_w  = average_losses_across_data_parallel_group([loss_wo_w])
     loss_wo_w = loss_wo_w.unsqueeze(0)
-    return loss, {"loss": averaged_loss[0], "loss_wo_w": averaged_loss_wo_w[0]}
+
+    loss_f1 = output_tensor[2].mean()
+    averaged_loss_f1  = average_losses_across_data_parallel_group([loss_f1])
+    loss_f1 = loss_f1.unsqueeze(0)
+
+    return loss, {"loss": averaged_loss[0], "loss_wo_w": averaged_loss_wo_w[0], "loss_f1": averaged_loss_f1[0]}
+
+def sr_loss_func(output_tensor):
+    """Loss function."""
+    loss = output_tensor[0].mean()
+    averaged_loss = average_losses_across_data_parallel_group([loss])
+    loss = loss.unsqueeze(0)
+
+    return loss, {"loss": averaged_loss[0]}
 
 def forward_step(data_iterator, model):
     """Forward training step.
@@ -402,6 +429,7 @@ def forward_step(data_iterator, model):
     """
     batch = get_batch(data_iterator)
     output_tensor_list = model(batch)
+    # breakpoint()
 
     return output_tensor_list, loss_func
 
@@ -611,7 +639,16 @@ def get_train_valid_test_num_samples():
 def get_batch_on_this_tp_cp_rank_vast(data_iterator):
     def _broadcast(item):
         if item is not None:
+            import torch.distributed as dist
+            rank = dist.get_rank()
             torch.distributed.broadcast(item, mpu.get_tensor_context_parallel_src_rank(), group=mpu.get_tensor_context_parallel_group())
+    
+    transformer_dim = 4096
+    img_dim = 20
+    video_dim = 16
+    image_scale = 8
+    frame_scale = 4
+    clip_dim=768
 
     if mpu.get_tensor_context_parallel_rank() == 0:
         if data_iterator is not None:
@@ -622,6 +659,7 @@ def get_batch_on_this_tp_cp_rank_vast(data_iterator):
         sizes_info = {}
         type_info = {}
         batch=dict(data)
+        dtype = torch.bfloat16
 
         from teletron.core.parallel_state import get_comm_pair
         comm_pair = get_comm_pair()
@@ -629,6 +667,7 @@ def get_batch_on_this_tp_cp_rank_vast(data_iterator):
         tensors_info = torch.empty((16), device=torch.cuda.current_device(), dtype=torch.int32)
         req = dist.irecv(tensors_info, comm_pair.producer, tag=0)
         req.wait()
+        # print(f"size info: {tensors_info}")
 
         args = get_args()
         if args.distributed_vae:
@@ -648,6 +687,7 @@ def get_batch_on_this_tp_cp_rank_vast(data_iterator):
 
             
             
+            # print("tensor shape: ", prompt_ids[0].size(1))
             req = dist.irecv(recv_tensor, comm_pair.producer, tag = 0)
             req.wait()
 
@@ -658,10 +698,50 @@ def get_batch_on_this_tp_cp_rank_vast(data_iterator):
             latents = latents.view(tensors_info[11] , tensors_info[12] , tensors_info[13] , tensors_info[14] , tensors_info[15])
         else:
             pass
+        
+        # image_size = data['images'].size()
+        # # image_size[1] = 81
+
+
+        
+
+        # args = get_args()
+        # if args.distributed_vae:
+        #     token_length_size = 1
+        #     transformer_embedding_size = max_length* transformer_dim
+        #     clip_embedding_size = (max_length+2)*1280
+        #     first_img_embedding_size = img_dim *( image_size[1]//frame_scale + 1)*(image_size[3]//image_scale)*(image_size[4]//image_scale)
+        #     video_embedding_size = video_dim *( image_size[1]//frame_scale + 1)*(image_size[3]//image_scale)*(image_size[4]//image_scale)
+            
+        #     recv_tensor = torch.empty((token_length_size + transformer_embedding_size +clip_embedding_size +first_img_embedding_size + video_embedding_size ), device=torch.cuda.current_device(), dtype=torch.bfloat16)
+
+        #     intervals = [0, 
+        #                 token_length_size, 
+        #                 token_length_size + transformer_embedding_size, 
+        #                 token_length_size + transformer_embedding_size +clip_embedding_size,
+        #                 token_length_size + transformer_embedding_size +clip_embedding_size +first_img_embedding_size,
+        #                 token_length_size + transformer_embedding_size +clip_embedding_size +first_img_embedding_size + video_embedding_size 
+        #                 ]
+
+            
+            
+        #     # print("tensor shape: ", prompt_ids[0].size(1))
+        #     req = dist.irecv(recv_tensor, comm_pair.producer, tag = 0)
+        #     req.wait()
+
+        #     token_length, context, clip_feature, img_y, latents = unpack_tensors(recv_tensor, intervals)
+        #     context = context.view(1, token_length, transformer_dim)
+        #     clip_feature = clip_feature.view(1, token_length+2, 1280)
+        #     img_y = img_y.view(1, img_dim, ( image_size[1]//frame_scale + 1), image_size[3]//image_scale, image_size[4]//image_scale)
+        #     latents = latents.view(1, video_dim, image_size[1]//frame_scale + 1, image_size[3]//image_scale, image_size[4]//image_scale)
+        # else:
+        #     # TODO: remove use fix data
+        #     pass
+
 
         batch["context"] = context
         batch["clip_feature"] = clip_feature
-        batch["image_emb_y"] = img_y
+        batch["img_emb_y"] = img_y
         batch["latents"] = latents
         for key, tensor in batch.items():
             if isinstance(tensor, torch.Tensor):
@@ -670,6 +750,7 @@ def get_batch_on_this_tp_cp_rank_vast(data_iterator):
             sizes_info[key] = tensor.size() if tensor is not None and isinstance(tensor, torch.Tensor)  else len(tensor)
             type_info[key] = tensor.dtype if tensor is not None and isinstance(tensor, torch.Tensor) else type(tensor)
 
+        # print("sizes_info: ", sizes_info)
         # Step 2: 广播大小信息
         sizes_info = torch.distributed.broadcast_object_list([sizes_info],mpu.get_tensor_context_parallel_src_rank(), group=mpu.get_tensor_context_parallel_group())
         type_info = torch.distributed.broadcast_object_list([type_info],mpu.get_tensor_context_parallel_src_rank(), group=mpu.get_tensor_context_parallel_group())
@@ -708,11 +789,17 @@ def get_batch_on_this_tp_cp_rank_vast(data_iterator):
     
     return batch
 
-
-def get_batch_on_this_tp_cp_rank_wan_dist(data_iterator):
+def get_batch_on_this_tp_cp_rank_vast_dist(data_iterator):
     def _broadcast(item):
         if item is not None:
             torch.distributed.broadcast(item, mpu.get_tensor_context_parallel_src_rank(), group=mpu.get_tensor_context_parallel_group())
+    
+    transformer_dim = 4096
+    img_dim = 20
+    video_dim = 16
+    image_scale = 8
+    frame_scale = 4
+    clip_dim=768
 
     if mpu.get_tensor_context_parallel_rank() == 0:
         if data_iterator is not None:
@@ -723,8 +810,9 @@ def get_batch_on_this_tp_cp_rank_wan_dist(data_iterator):
         sizes_info = {}
         type_info = {}
         batch=dict(data)
+        dtype = torch.bfloat16
 
-        from teletron.core.parallel_state import get_comm_pair
+        from teletron.core.parallel_state import get_comm_pair, get_world_group
         comm_pair = get_comm_pair()
         tensors_info = torch.ones((16), device=torch.cuda.current_device(), dtype=torch.int32)
         req = dist.irecv(tensors_info, comm_pair.producer)
@@ -763,7 +851,7 @@ def get_batch_on_this_tp_cp_rank_wan_dist(data_iterator):
         batch={}
         batch["context"] = context
         batch["clip_feature"] = clip_feature
-        batch["image_emb_y"] = img_y
+        batch["img_emb_y"] = img_y
         batch["latents"] = latents
         batch["noise"] = noise
         for key, tensor in batch.items():
@@ -867,46 +955,13 @@ def get_batch_on_this_tp_cp_rank_vast_origin(data_iterator):
 
     return batch
 
-
-def set_config():
-    args = get_args()
-    if args.task_type == "t2v":
-        print("loading t2v config")
-        from config.hunyuanvideo_t2v import config
-    elif args.task_type == "i2v":
-        print("loading i2v config")
-        from config.hunyuanvideo_i2vhy import config 
-    elif args.task_type == "i2v_multimask":
-        print("loading i2v_multimask config")
-        from config.hunyuanvideo_i2v_multimask import config
-    elif args.task_type == "i2vhy_token_replace":
-        print("loading i2vhy_token_replace config")
-        from config.hunyuanvideo_i2vhy_token_replace import config
-    elif args.task_type == "t2i_wanvae": 
-        print("loading t2i_wanvae config")
-        from config.hunyuanvideo_t2i_wanvae import config
-    elif args.task_type == "wan_flf":
-        from config.wan_flf import config
-    elif args.task_type == "wan_i2v_prone":
-        from config.prone10_lowerlr import config
-    elif args.task_type == "wan_i2v_bucket":
-        from config.wan_i2v_bucket import config
-    elif args.task_type == "wan_multimask":
-        from config.wan_i2v_multimask import config
-    elif args.task_type == "wan_self_forcing":
-        from config.wan_self_forcing import config
-    else:
-        return None
-    config_vast = load_config(config)
-    return config_vast
-
-
 def core_transformer_config_from_args(args, config_class=None):
 
     # Config class.
     if config_class is None:
         config_class = TransformerConfig
     config_class = config_class 
+    # breakpoint()
 
     # Translate args to core transformer configuration
     kw_args = {}
@@ -921,6 +976,7 @@ def core_transformer_config_from_args(args, config_class=None):
     kw_args['batch_p2p_comm'] = not args.overlap_p2p_comm
     kw_args['num_moe_experts'] = args.num_experts
     kw_args['rotary_interleaved'] = args.rotary_interleaved
+    kw_args['gradient_accumulation_fusion'] = False
     if args.swiglu:
         kw_args['activation_func'] = F.silu
         kw_args['gated_linear_unit'] = True
@@ -943,6 +999,14 @@ def core_transformer_config_from_args(args, config_class=None):
 
     # Return config.
     return config_class(**kw_args)
+
+###### BIAS GELU FUSION/ NO AUTOGRAD ################
+# 1/sqrt(2*pi)-> 0.3989423
+# 1/sqrt(2)   -> 0.70710678
+# sqrt(2/pi)  -> 0.79788456
+# this function is tanh approximation of gelu
+# actual gelu is:
+# x * 0.5 * (1.0 + torch.erf(x * 0.70710678))
 
 @jit_fuser
 def bias_gelu(bias, y):
@@ -1371,14 +1435,16 @@ def _add_network_size_args(parser):
                        dest='bert_binary_head')
     group.add_argument('--untie-embeddings-and-output-weights', action='store_true',
                        help='Untie embeddings and output weights.'),
-    group.add_argument("--has-image-input", action='store_true',
-                       help='If set, use image input in model')
     return parser
 
 
 def _add_logging_args(parser):
     group = parser.add_argument_group(title='logging')
-
+    group.add_argument('--producer-log-level', type=int,
+                       default=2, choices=range(1,3),
+                       help='logging level to producer detail. '
+                       '   1: DEBUG LEVEL '
+                       '   2: INFO LEVEL')
     group.add_argument('--log-params-norm', action='store_true',
                        help='If set, calculate and log parameters norm.')
     group.add_argument('--log-num-zeros-in-grad', action='store_true',
@@ -1507,6 +1573,7 @@ def _add_regularization_args(parser):
 def _add_training_args(parser):
     group = parser.add_argument_group(title='training')
 
+    group.add_argument('--config-path', type=str, default='config.teleai_i2v.config')
     group.add_argument('--micro-batch-size', type=int, default=None,
                        help='Batch size per model instance (local batch size). '
                        'Global batch size is local batch size times data '
@@ -1842,6 +1909,8 @@ def _add_checkpointing_args(parser):
                        help='Apply full save parallelization across DP for'
                             ' distributed checkpoints. Depending on ckpt format'
                             ' might increase number of files in the checkpoint.')
+    group.add_argument('--with-ema', action='store_true', help='save checkpoint with ema model')
+    group.add_argument('--ema-decay', type=float, default=0.9999, help='decay of ema model')
 
     return parser
 
@@ -2006,57 +2075,8 @@ def _add_data_args(parser):
     group.add_argument('--mock-data', action='store_true',
                        help='Skip data loading and validation and opt for artificial '
                        'generation of mock data when an implementation is available.')
-
-    group.add_argument('--vocab-size', type=int, default=None,
-                       help='Size of vocab before EOD or padding.')
-    group.add_argument('--vocab-file', type=str, default=None,
-                       help='Path to the vocab file.')
-    group.add_argument('--merge-file', type=str, default=None,
-                       help='Path to the BPE merge file.')
-    group.add_argument('--vocab-extra-ids', type=int, default=0,
-                       help='Number of additional vocabulary tokens. '
-                            'They are used for span masking in the T5 model')
-    group.add_argument('--seq-length', type=int, default=None,
-                       help='Maximum sequence length to process.')
-    group.add_argument('--encoder-seq-length', type=int, default=None,
-                       help='Maximum encoder sequence length to process.'
-                       'This should be exclusive of --seq-length')
-    group.add_argument('--decoder-seq-length', type=int, default=None,
-                       help="Maximum decoder sequence length to process.")
-    group.add_argument('--retriever-seq-length', type=int, default=256,
-                       help='Maximum sequence length for the biencoder model '
-                       'for retriever')
-    group.add_argument('--sample-rate', type=float, default=1.0,
-                       help='sample rate for training data. Supposed to be 0 '
-                            ' < sample_rate < 1')
-    group.add_argument('--mask-prob', type=float, default=0.15,
-                       help='Probability of replacing a token with mask.')
-    group.add_argument('--short-seq-prob', type=float, default=0.1,
-                       help='Probability of producing a short sequence.')
     group.add_argument('--num-workers', type=int, default=2,
                        help="Dataloader number of workers.")
-    group.add_argument('--tokenizer-type', type=str,
-                       default=None,
-                       choices=['BertWordPieceLowerCase',
-                                'BertWordPieceCase',
-                                'GPT2BPETokenizer',
-                                'SentencePieceTokenizer',
-                                'GPTSentencePieceTokenizer',
-                                'Llama2Tokenizer',
-                                'NullTokenizer'],
-                       help='What type of tokenizer to use.')
-    group.add_argument('--tokenizer-model', type=str, default=None,
-                       help='Sentencepiece tokenizer model.')
-    group.add_argument('--reset-position-ids', action='store_true',
-                       help='Reset posistion ids after end-of-document token.')
-    group.add_argument('--reset-attention-mask', action='store_true',
-                       help='Reset self attention maske after '
-                       'end-of-document token.')
-    group.add_argument('--eod-mask-loss', action='store_true',
-                       help='Mask loss for the end of document tokens.')
-    group.add_argument('--no-create-attention-mask-in-dataloader', action='store_false',
-                       help='If set, do not create attention_masks in dataloader.',
-                       dest='create_attention_mask_in_dataloader')
 
     return parser
 
@@ -2069,135 +2089,6 @@ def _add_autoresume_args(parser):
     group.add_argument('--adlr-autoresume-interval', type=int, default=1000,
                        help='Intervals over which check for autoresume'
                        'termination signal')
-
-    return parser
-
-
-def _add_biencoder_args(parser):
-    group = parser.add_argument_group(title='biencoder')
-
-    # network size
-    group.add_argument('--ict-head-size', type=int, default=None,
-                       help='Size of block embeddings to be used in ICT and '
-                        'REALM (paper default: 128)')
-    group.add_argument('--biencoder-projection-dim', type=int, default=0,
-                       help='Size of projection head used in biencoder (paper'
-                        ' default: 128)')
-    group.add_argument('--biencoder-shared-query-context-model', action='store_true',
-                        help='Whether to share the parameters of the query '
-                        'and context models or not')
-
-    # checkpointing
-    group.add_argument('--ict-load', type=str, default=None,
-                       help='Directory containing an ICTBertModel checkpoint')
-    group.add_argument('--bert-load', type=str, default=None,
-                       help='Directory containing an BertModel checkpoint '
-                       '(needed to start ICT and REALM)')
-
-    # data
-    group.add_argument('--titles-data-path', type=str, default=None,
-                       help='Path to titles dataset used for ICT')
-    group.add_argument('--query-in-block-prob', type=float, default=0.1,
-                       help='Probability of keeping query in block for '
-                       'ICT dataset')
-    group.add_argument('--use-one-sent-docs', action='store_true',
-                       help='Whether to use one sentence documents in ICT')
-    group.add_argument('--evidence-data-path', type=str, default=None,
-                       help='Path to Wikipedia Evidence frm DPR paper')
-
-    # training
-    group.add_argument('--retriever-report-topk-accuracies', nargs='+', type=int,
-                        default=[], help="Which top-k accuracies to report "
-                        "(e.g. '1 5 20')")
-    group.add_argument('--retriever-score-scaling', action='store_true',
-                       help='Whether to scale retriever scores by inverse '
-                        'square root of hidden size')
-
-    # faiss index
-    group.add_argument('--block-data-path', type=str, default=None,
-                       help='Where to save/load BlockData to/from')
-    group.add_argument('--embedding-path', type=str, default=None,
-                       help='Where to save/load Open-Retrieval Embedding'
-                        ' data to/from')
-
-    # indexer
-    group.add_argument('--indexer-batch-size', type=int, default=128,
-                       help='How large of batches to use when doing indexing '
-                       'jobs')
-    group.add_argument('--indexer-log-interval', type=int, default=1000,
-                       help='After how many batches should the indexer '
-                       'report progress')
-    return parser
-
-
-def _add_vision_args(parser):
-    group = parser.add_argument_group(title="vision")
-
-    # general vision arguements
-    group.add_argument('--num-classes', type=int, default=1000,
-                       help='num of classes in vision classificaiton task')
-    group.add_argument('--img-h', type=int, default=224,
-                       help='Image height for vision classification task')
-    group.add_argument('--img-w', type=int, default=224,
-                       help='Image height for vision classification task')
-    group.add_argument('--num-channels', type=int, default=3,
-                       help='Number of channels in input image data')
-    group.add_argument('--patch-dim', type=int, default=16,
-                       help='patch dimension')
-    group.add_argument('--classes-fraction', type=float, default=1.0,
-                       help='training with fraction of classes.')
-    group.add_argument('--data-per-class-fraction', type=float, default=1.0,
-                       help='training with fraction of data per class.')
-    group.add_argument('--no-data-sharding', action='store_false',
-                       help='Disable data sharding.',
-                       dest='data_sharding')
-    group.add_argument('--head-lr-mult', type=float, default=1.0,
-                       help='learning rate multiplier for head during finetuning')
-
-    # pretraining type and backbone selection`
-    group.add_argument('--vision-pretraining', action='store_true',
-                       help='flag to indicate vision pretraining')
-    group.add_argument('--vision-pretraining-type', type=str, default='classify',
-                       choices=['classify', 'inpaint', 'dino'],
-                       help='pretraining objectives')
-    group.add_argument('--vision-backbone-type', type=str, default='vit',
-                       choices=['vit', 'mit', 'swin'],
-                       help='backbone types types')
-    group.add_argument('--swin-backbone-type', type=str, default='tiny',
-                       choices=['tiny', 'base', 'h3'],
-                       help='pretraining objectives')
-    # inpainting arguments
-    group.add_argument('--mask-type', type=str, default='random',
-                       choices=['random', 'row'],
-                       help='mask types')
-    group.add_argument('--mask-factor', type=float, default=1.0,
-                       help='mask size scaling parameter')
-
-    # dino arguments
-    group.add_argument('--iter-per-epoch', type=int, default=1250,
-                       help='iterations per epoch')
-    group.add_argument('--dino-local-img-size', type=int, default=96,
-                       help='Image size for vision classification task')
-    group.add_argument('--dino-local-crops-number', type=int, default=10,
-                       help='Number of local crops')
-    group.add_argument('--dino-head-hidden-size', type=int, default=2048,
-                       help='Hidden dimension size in dino head')
-    group.add_argument('--dino-bottleneck-size', type=int, default=256,
-                       help='Bottle neck dimension in dino head ')
-    group.add_argument('--dino-freeze-last-layer', type=float, default=1,
-                       help='Freezing last layer weights')
-    group.add_argument('--dino-norm-last-layer', action='store_true',
-                       help='Disable Norm in last layer.')
-    group.add_argument('--dino-warmup-teacher-temp', type=float, default=0.04,
-                       help='warump teacher temperature')
-    group.add_argument('--dino-teacher-temp', type=float, default=0.07,
-                       help='teacher temperature')
-    group.add_argument('--dino-warmup-teacher-temp-epochs', type=int, default=30,
-                       help='warmup teacher temperaure epochs')
-
-    # regularization arguments
-    group.add_argument('--qk-layernorm', action='store_true',
-                       help='Whether to layer normalize the q and k attention embeddings.')
 
     return parser
 

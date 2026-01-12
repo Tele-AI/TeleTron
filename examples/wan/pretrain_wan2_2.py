@@ -45,13 +45,13 @@ def forward_step(data_iterator, model):
     prompt_emb["context"] = batch["context"]
     training_target = flow_scheduler.training_target(latents, noise, timestep)
     image_emb = {}
-    image_emb["y"] = batch["image_emb_y"]
+    image_emb["y"] = batch["img_emb_y"]
     noisy_latents = flow_scheduler.add_noise(latents, noise, timestep)
 
     output_tensor_list = model(x=noisy_latents, 
                                timestep=timestep, 
-                               context=batch["context"],
-                               y=batch["image_emb_y"])
+                               context=prompt_emb["context"],
+                               y=image_emb["y"])
     
     loss = torch.nn.functional.mse_loss(
         output_tensor_list.float(), training_target.float()

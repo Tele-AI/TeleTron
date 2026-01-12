@@ -1,5 +1,3 @@
-# Copyright (c) 2025 TeleAI-infra Team and Nvidia Megatron-LM Team. All rights reserved.
-
 import os
 import sys
 import torch
@@ -50,6 +48,8 @@ def get_checkpoint_name(checkpoints_path, iteration, release=False,
                         expert_parallel=None, expert_rank=None,
                         return_base_dir=False,
                         use_zero2=False,
+                        ema=False,
+                        ema_config=False,
                         ):
     """Determine the directory name for this rank's checkpoint."""
     if release:
@@ -85,6 +85,12 @@ def get_checkpoint_name(checkpoints_path, iteration, release=False,
     if expert_parallel:
         common_path = common_path + f'_{expert_rank:03d}'
 
+    if ema:
+        return os.path.join(common_path, "ema_model.pt")
+
+    if ema_config:
+        return os.path.join(common_path, "ema_config.pt")
+    
     if use_zero2:
         optimizer_checkpoint_names = []
         dp_size = mpu.get_data_parallel_world_size()

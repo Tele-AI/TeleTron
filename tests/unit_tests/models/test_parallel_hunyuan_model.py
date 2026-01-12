@@ -79,10 +79,10 @@ def parallel_hunyuan_model_testing(rank, world_size, q, mock_teletron):
     # from tensorwatch import watch_module_forward_backward, TensorWatch
     # watch_module_forward_backward(parallel_hunyuan_model)
 
-    input_dict = torch.load("./hunyuan_inputs.pt", map_location=f"cuda:{rank}")
+    input_dict = torch.load("/nvfile-heatstorage/teleai-infra/qiuyang/datasets/rank0_inputs.pt", map_location=f"cuda:{rank}")
     hunyuan_model_output = hunyuan_model(**input_dict)
 
-    input_dict = torch.load("./hunyuan_inputs.pt", map_location=f"cuda:{rank}")
+    input_dict = torch.load("/nvfile-heatstorage/teleai-infra/qiuyang/datasets/rank0_inputs.pt", map_location=f"cuda:{rank}")
     parallel_hunyuan_model_output = parallel_hunyuan_model(**input_dict)
 
     if is_close_by_normalized_euclid_dist(hunyuan_model_output[0], parallel_hunyuan_model_output[0]):

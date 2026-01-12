@@ -2,7 +2,8 @@
 
 """Megatron number of micro-batches calculators."""
 
-from abc import ABC, abstractmethod
+from abc import ABC
+from abc import abstractmethod
 
 
 def build_num_microbatches_calculator(args):

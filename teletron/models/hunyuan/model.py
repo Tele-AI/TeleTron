@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from diffusers.configuration_utils import ConfigMixin
+from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders import PeftAdapterMixin
 from diffusers.utils import (
     USE_PEFT_BACKEND,
@@ -681,11 +681,47 @@ class HunyuanVideoTransformerBlock(nn.Module):
         return hidden_states, encoder_hidden_states
 
 class HunyuanVideoTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
-    """
+    r"""
     A Transformer model for video-like data used in [HunyuanVideo](https://huggingface.co/tencent/HunyuanVideo).
+
+    Args:
+        in_channels (`int`, defaults to `16`):
+            The number of channels in the input.
+        out_channels (`int`, defaults to `16`):
+            The number of channels in the output.
+        num_attention_heads (`int`, defaults to `24`):
+            The number of heads to use for multi-head attention.
+        attention_head_dim (`int`, defaults to `128`):
+            The number of channels in each head.
+        num_layers (`int`, defaults to `20`):
+            The number of layers of dual-stream blocks to use.
+        num_single_layers (`int`, defaults to `40`):
+            The number of layers of single-stream blocks to use.
+        num_refiner_layers (`int`, defaults to `2`):
+            The number of layers of refiner blocks to use.
+        mlp_ratio (`float`, defaults to `4.0`):
+            The ratio of the hidden layer size to the input size in the feedforward network.
+        patch_size (`int`, defaults to `2`):
+            The size of the spatial patches to use in the patch embedding layer.
+        patch_size_t (`int`, defaults to `1`):
+            The size of the tmeporal patches to use in the patch embedding layer.
+        qk_norm (`str`, defaults to `rms_norm`):
+            The normalization to use for the query and key projections in the attention layers.
+        guidance_embeds (`bool`, defaults to `True`):
+            Whether to use guidance embeddings in the model.
+        text_embed_dim (`int`, defaults to `4096`):
+            Input dimension of text embeddings from the text encoder.
+        pooled_projection_dim (`int`, defaults to `768`):
+            The dimension of the pooled projection of the text embeddings.
+        rope_theta (`float`, defaults to `256.0`):
+            The value of theta to use in the RoPE layer.
+        rope_axes_dim (`Tuple[int]`, defaults to `(16, 56, 56)`):
+            The dimensions of the axes to use in the RoPE layer.
     """
+
     _supports_gradient_checkpointing = True
 
+    # @register_to_config
     def __init__(self, config) -> None:
         super().__init__()
         # hunyuan config
@@ -703,12 +739,12 @@ class HunyuanVideoTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         self.pooled_projection_dim = hunyuan_config.pooled_projection_dim
         self.rope_theta = hunyuan_config.rope_theta
         self.rope_axes_dim = hunyuan_config.rope_axes_dim
+        self.num_refiner_layers = hunyuan_config.num_refiner_layers
 
         # config
         self.inner_dim = config.hidden_size
         self.num_layers = config.num_layers
         self.num_single_layers = config.num_single_layers
-        self.num_refiner_layers = config.num_refiner_layers
 
         # 1. Latent and condition embedders
         self.x_embedder = HunyuanVideoPatchEmbed(

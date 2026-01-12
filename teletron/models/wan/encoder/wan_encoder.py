@@ -6,10 +6,12 @@ from typing import Dict, Any, Tuple, List
 
 from teletron.core.distributed.base_encoder import BaseEncoder
 from .wan_prompter import WanPrompter
-from .model_manager import ModelManager
+from .wan_video_vae import WanVideoVAE
+from .wan_video_text_encoder import WanTextEncoder
+from .wan_video_image_encoder import WanImageEncoder
+
 from .wan_encoder_utils import get_encoder_features
-from teletron.models.wan.pipelines.wan_video import WanVideoPipeline
-from teletron.utils import get_args
+from teletron.utils import get_args, set_config
 
 def get_encoder_model_paths(path):
     filenames = [
@@ -34,22 +36,31 @@ class WanVideoEncoder(BaseEncoder):
             return WanVideoEncoder._OUTPUT_MOE_SCHEMA
         return WanVideoEncoder._OUTPUT_SCHEMA
 
-    def __init__(self, device: torch.device, **kwargs: Any):
+    def __init__(self, device: torch.device):
         super().__init__(device)
-        args = get_args()
-        kwargs['model_paths'] = get_encoder_model_paths(args.encoder_model_path)
-        kwargs['tokenizer_path'] = args.encoder_tokenizer_path
-        kwargs['tiler_kwargs'] = {
-            "tiled": False, 
-            "tile_size":  (34, 34), 
-            "tile_stride": (18, 16)
-        }
-        self.model_paths = kwargs.get("model_paths")
-        self.tokenizer_path = kwargs.get("tokenizer_path")
-        self.tiler_kwargs = kwargs.get("tiler_kwargs", {})
 
-        if not self.model_paths or not self.tokenizer_path:
-            raise ValueError("WanVideoEncoder需要 'model_paths' 和 'tokenizer_path' 参数。")
+        encoder_model_config = set_config().get("model_config", None).get("encoder", None)
+        if encoder_model_config is None:
+            raise ValueError("未找到encoder模型配置。")
+
+        self.vae_path = encoder_model_config.get("vae", None).get("path", None)
+        self.tiler_kwargs = encoder_model_config.get("vae", None).get("tiler_kwargs", {})
+        if self.tiler_kwargs is None:
+            self.tiler_kwargs = dict(
+                tiled=False,
+                tile_size=(34, 34),
+                tile_stride=(18, 16),
+            )
+        self.text_encoder_path = encoder_model_config.get("text_encoder", None).get("path", None)
+        self.tokenizer_path = encoder_model_config.get("text_encoder", None).get("tokenizer_path", None)
+
+        if encoder_model_config.get("image_encoder", None) is not None:
+            self.image_encoder_path = encoder_model_config.get("image_encoder", None).get("path", None)
+        else:
+            self.image_encoder_path = None
+
+        if not self.vae_path or not self.text_encoder_path or not self.tokenizer_path:
+            raise ValueError("TeleaiEncoder需要 'text_encoder_path' 和 'tokenizer_path' 参数。")
 
         # 将模型组件初始化为None，它们将在setup()中被加载
         self.text_encoder = None
@@ -61,19 +72,23 @@ class WanVideoEncoder(BaseEncoder):
         """加载所有必需的WAN模型组件到指定设备。"""
         print(f"在设备 {self.device} 上设置 WanVideoEncoder...")
         
-        model_manager = ModelManager(torch_dtype=torch.float32, device="cpu")
-        model_manager.load_models(self.model_paths)
-        
-        pipe = WanVideoPipeline.from_model_manager(model_manager)
-        
-        self.text_encoder = pipe.text_encoder.to(device=self.device, dtype=torch.bfloat16)
-        self.image_encoder = pipe.image_encoder.to(device=self.device)
-        self.vae = pipe.vae.to(device=self.device, dtype=torch.bfloat16)
-        del pipe # 释放不再需要的内存
+        print(f"加载 VAE 模型... {self.vae_path}")
+        self.vae = WanVideoVAE().to(device=self.device, dtype=torch.bfloat16).eval().requires_grad_(False)
+        self.vae.model.load_state_dict(torch.load(self.vae_path, map_location='cpu'), strict=True)
 
+        print(f"加载 Text Encoder 模型... {self.text_encoder_path}")
+        self.text_encoder = WanTextEncoder().to(device=self.device, dtype=torch.bfloat16)
+        self.text_encoder.load_state_dict(torch.load(self.text_encoder_path, map_location='cpu', weights_only=False), strict=True)
         self.prompter = WanPrompter()
         self.prompter.fetch_models(self.text_encoder)
         self.prompter.fetch_tokenizer(self.tokenizer_path)
+
+
+        if self.image_encoder_path is not None:
+            print(f"加载 Image Encoder 模型... {self.image_encoder_path}")
+            self.image_encoder = WanImageEncoder().to(device=self.device, dtype=torch.bfloat16).eval().requires_grad_(False)
+            self.image_encoder.model.load_state_dict(torch.load(self.image_encoder_path, map_location='cpu', weights_only=False), strict=False)
+
         print("WanVideoEncoder 设置完成。")
 
 

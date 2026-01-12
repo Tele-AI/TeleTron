@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Runs the "7B" parameter model
+# Runs the "175B" parameter model
 export PYTHONUNBUFFERED=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NVTE_FUSED_ATTN=0
@@ -8,8 +8,11 @@ export NVTE_FLASH_ATTN=1
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-ENCODER_MODEL_PATH=<Specify path>
-ENCODER_TOKENIZER_PATH=<Specify path to file>/google/umt5-xxl
+ENCODER_MODEL_PATH=/workspace/Wan2___1-I2V-14B-480P
+ENCODER_TOKENIZER_PATH=/workspace/Wan2___1-I2V-14B-480P/google/umt5-xxl
+MERGE_FILE=/nvfile-heatstorage/teleai-infra/wxe/Megatron-LM/data/gpt_2_merge.txt
+DATA_PATH=./checkpoint
+CONFIG_PATH=config.prone10_lowerlr.config
 
 TP=1
 CP=2
@@ -25,9 +28,12 @@ MASTER_ADDR=${MASTER_ADDR:-'127.0.0.1'}
 MASTER_PORT='11220'
 NNODES=${WORLD_SIZE:-'1'}
 NODE_RANK=${RANK:-'0'}
+
+
+N_GPU=$((N_GPU_FOR_TRAIN+N_GPU_FOR_DATA))
+WORLD_SIZE=$N_GPU_FOR_TRAIN
+GBS=$(($WORLD_SIZE*$MBS/$CP/$TP))
 GPUS_PER_NODE=$(echo $CUDA_VISIBLE_DEVICES | awk -F"," '{print NF}')
-
-
 
 if [ $N_MOE -eq 1 ]; then
     MOE_ARGS=(
@@ -86,7 +92,7 @@ TRAINING_ARGS=(
     --recompute-granularity full 
     --recompute-method block 
     --activation-offload
-    --use-distributed-optimizer
+    --use-zero2
     --recompute-num-layers 40
     --no-rope-fusion
     --distributed-timeout-minutes 60
@@ -99,13 +105,14 @@ MODEL_PARALLEL_ARGS=(
     --distributed-vae-world-size $N_GPU_FOR_DATA
     --consumer-models-num $N_MOE
 )
-
 DATA_ARGS=(
-    --dataset-type FakeDataset
+    --dataset-type VastDataset
+    --data-path $DATA_PATH 
+    --merge-file $MERGE_FILE 
     --split 949,50,1
     --dataloader-type single
     --num-workers 1
-    --num-frames 9
+    --config-path ${CONFIG_PATH}
 )
 
 EVAL_AND_LOGGING_ARGS=(

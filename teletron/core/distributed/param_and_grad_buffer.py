@@ -1,5 +1,3 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
-
 import math
 import os
 from enum import Enum
@@ -7,6 +5,8 @@ from logging import getLogger
 from typing import Dict, List, Optional
 
 import torch
+
+from .. import parallel_state
 
 logger = getLogger(__name__)
 
@@ -225,7 +225,6 @@ class ParamAndGradBuffer:
         gradient_scaling_factor: float,
         check_for_nan_in_grad: bool,
     ):
-
         # Check that params are unique.
         unique_params = set()
         for param in params:
@@ -406,6 +405,22 @@ class ParamAndGradBuffer:
                 numel_unpadded=per_bucket_numel_unpadded[cur_bucket_id],
                 bucket_id=cur_bucket_id,
             )
+
+        # Log buckets for all PP stages.
+        # if (
+        #     parallel_state.get_data_parallel_rank(with_context_parallel=True) == 0
+        #     and parallel_state.get_tensor_model_parallel_rank() == 0
+        # ):
+        #     logger.info(
+        #         f'Number of buckets for gradient all-reduce / reduce-scatter: {len(self.buckets)}'
+        #     )
+        #     for index, bucket in enumerate(self.buckets):
+        #         numel = 0
+        #         for param in bucket.params:
+        #             numel += param.data.nelement()
+        #         logger.info(f'Params for bucket {index+1} ({numel} elements):')
+        #         for param in bucket.params:
+        #             logger.info(f'    {param_to_name[param]}')
 
     def _get(self, shape: torch.Size, start_index: int, buffer_type: BufferType) -> torch.Tensor:
         """
