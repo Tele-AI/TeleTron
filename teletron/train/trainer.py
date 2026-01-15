@@ -1,5 +1,3 @@
-# Copyright (c) 2025 TeleAI-infra Team and Nvidia Megatron-LM Team. All rights reserved.
-
 import torch
 import torch.distributed as dist
 import dataclasses
@@ -12,10 +10,12 @@ from megatron.core.transformer.module import Float16Module
 from megatron.core.enums import ModelType
 from megatron.core.distributed import finalize_model_grads
 from megatron.core import mpu, tensor_parallel
-from megatron.core.optimizer import  OptimizerConfig
+from teletron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.optimizer import (
+    OptimizerConfig,
+)
 import deepspeed
 
-from teletron.core.distributed import DistributedDataParallel as DDP
 from teletron.utils import (
     print_rank_0,
     print_datetime,
@@ -26,8 +26,10 @@ from teletron.utils import (
     validate_args,
     set_args,
     get_args,
+    set_config,
     update_num_microbatches,
     get_num_microbatches,
+    get_timers
 )
 from teletron.train.utils import (
     _initialize_distributed,
@@ -41,18 +43,20 @@ from teletron.train.utils import (
     calc_params_l2_norm,
     get_grad_norm
 )
-from teletron.core.parallel_state import get_transformer_model_group
+from teletron.core.parallel_state import get_transformer_model_group, get_world_group
 from teletron.train.dataloader import DataloaderMixin
 from teletron.models.build import build_model
-from teletron.train.checkpoint import CheckPointMixin, unwrap_model, ensure_directory_exists
+from teletron.train.checkpoint import CheckPointMixin, unwrap_model, ensure_directory_exists, EMAModel
 from teletron.train.lr_scheduler import SchedulerMixin
 from teletron.train.telelogger import TeleLoggerMixin
-from teletron.datasets.build import build_train_valid_test_datasets
-from teletron.core.distributed.distributed_encoder import producer_process
-from teletron.models.encoder_registry import get_encoder_name
-from teletron.train.consumer_dataloader import create_batch_loader
-
 from logging import getLogger
+from teletron.datasets.build import build_train_valid_test_datasets
+from teletron.core.distributed.distributed_encoder import DistDataProducer
+from teletron.train.consumer_dataloader import create_batch_loader
+from functools import partial
+import logging
+
+
 logger = getLogger(__name__)
 _TRAIN_START_TIME = time.time()
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
@@ -72,16 +76,18 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
         self.initialize_megatron(args)
         set_jit_fusion_options()
         transformer_group = get_transformer_model_group()
-        if transformer_group is None:            
-            producer_process(
-                rank=dist.get_rank(), 
-                world_size=dist.get_world_size(),
-                encoder_name=get_encoder_name(args.model),
+        if transformer_group is None:
+            rank = int(os.environ.get("RANK"))
+            producer_logger = logging.getLogger(f"ProducerRank{rank}")
+            producer_logger.setLevel(args.producer_log_level*10)
+            producer = DistDataProducer(
+                rank= rank, 
+                encoder_name=set_config().get('model_config', None).get('encoder', None).type,
                 device=torch.cuda.current_device(),
                 build_train_valid_test_data_iterators=self.build_train_valid_test_data_iterators, 
                 train_ds=None,
             )
-            
+            producer.run()
             exit()        
         global _TRAIN_START_TIME
         start_time_tensor = torch.tensor([_TRAIN_START_TIME],
@@ -94,18 +100,17 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
             time.time() - _TRAIN_START_TIME))
         print_datetime('after megatron is initialized')
 
-        self.model, self.optimizer, self.scheduler = \
+        self.model, self.optimizer, self.scheduler, self.ema_models = \
                                 self.setup_model_and_optimizer(args.model_type)
 
         self.train_itrt, self.valid_itrt, self.test_itrt = \
                                 self.get_iterator(len(self.model), dataset_provide_func)
-
-        dataiters = (self.train_itrt, self.valid_itrt, self.test_itrt)
-        self.train_itrt, self.valid_itrt, self.test_itrt = [
-        create_batch_loader(args, ds) if ds is not None else None 
-                for ds in dataiters
-            ]
+        
+        self.train_itrt = create_batch_loader(args, self.train_itrt) if args.train_iters > 0 else None
+        self.valid_itrt = create_batch_loader(args, self.valid_itrt) if args.eval_iters > 0 else None
+        self.test_itrt =  None
         self.config = get_model_config(self.model[0])
+        self.eval_time_steps = set_config().get('eval', None).get('eval_time_steps', None)
 
     def setup_model_and_optimizer(self,  
                                   model_type,
@@ -114,7 +119,6 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                                   lr_mult=1.0):
 
         args = get_args()
-        assert args.global_batch_size == args.micro_batch_size * mpu.get_data_parallel_world_size()
         if args.use_zero2:
             model = self.get_model(model_type, wrap_with_ddp=False)
         else:
@@ -136,7 +140,8 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
 
         opt_param_scheduler = self.get_optimizer_param_scheduler(optimizer)
         if args.load is not None or args.pretrained_checkpoint is not None:
-            args.iteration, args.num_floating_point_operations_so_far = self.load_checkpoint(
+            # timers('load-checkpoint', log_level=0).start(barrier=True)
+            args.iteration, args.num_floating_point_operations_so_far, optimizer, opt_param_scheduler = self.load_checkpoint(
                 model, optimizer, opt_param_scheduler, strict=True)
         else:
             args.iteration = 0
@@ -151,7 +156,20 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
             if args.fp16:
                 optimizer.reload_model_params()
 
-        return model, optimizer, opt_param_scheduler
+        if args.with_ema:
+            ema_models = []
+            for train_model in model:
+                ema_model = EMAModel(
+                    decay=args.ema_decay,
+                    rank=mpu.get_data_parallel_rank(with_context_parallel=True), 
+                    world_size=mpu.get_data_parallel_world_size(with_context_parallel=True),
+                )
+                ema_model.load_state_dict(train_model.state_dict(), device=torch.cuda.current_device(), dtype=torch.float32)
+                ema_models.append(ema_model)
+        else:
+            ema_models = None
+        
+        return model, optimizer, opt_param_scheduler, ema_models
 
     def model_provider(
         self,
@@ -161,9 +179,14 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
         add_decoder=True,
         parallel_output=True,
     ):
+        dit_model_config = set_config().get('model_config', None).get('dit', None)
         args = get_args()
-        cfg = core_transformer_config_from_args(args)
-        return build_model(args.model, cfg)
+        args.num_layers = dit_model_config.config.num_layers
+        args.hidden_size = dit_model_config.config.dim
+        args.ffn_hidden_size = dit_model_config.config.ffn_dim
+        args.num_attention_heads = dit_model_config.config.num_heads
+        megatron_cfg = core_transformer_config_from_args(args)
+        return build_model(dit_model_config.type, megatron_cfg)
 
     def get_model(self, model_type=ModelType.encoder_or_decoder, wrap_with_ddp=True):
         args = get_args()
@@ -228,9 +251,9 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
         for model_module in model:
             model_module.cuda(torch.cuda.current_device())
 
-        # Fp16 conversion.
+        # Fp16/Bf16 wrapper uses the model's transformer config, not HF config.
         if args.fp16 or args.bf16:
-            model = [Float16Module(module=model_module, config=model_module.config) for model_module in model]
+            model = [Float16Module(module=model_module, config=get_model_config(model_module)) for model_module in model]
         if wrap_with_ddp:
             config = get_model_config(model[0])
             model = [DDP(config,
@@ -302,34 +325,19 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
 
         # Build iterators.
         print("Building iterators.")
-        dl_type = args.dataloader_type
-
-        assert dl_type in ['single', 'cyclic', 'external']
-
-        def _get_iterator(dataloader_type, dataloader):
-            """Return dataset iterator."""
-            if dataloader_type == "single":
-                return iter(dataloader)
-            elif dataloader_type == "cyclic":
-                return iter(cyclic_iter(dataloader))
-            elif dataloader_type == "external":
-                # External dataloader is passed through. User is expected to define how to iterate.
-                return dataloader
-            else:
-                raise RuntimeError("unexpected dataloader type")
 
         if train_dataloader is not None:
-            train_data_iterator = _get_iterator(dl_type, train_dataloader)
+            train_data_iterator = iter(train_dataloader)
         else:
             train_data_iterator = None
 
         if valid_dataloader is not None:
-            valid_data_iterator = _get_iterator(dl_type, valid_dataloader)
+            valid_data_iterator = iter(valid_dataloader)
         else:
             valid_data_iterator = None
 
         if test_dataloader is not None:
-            test_data_iterator = _get_iterator(dl_type, test_dataloader)
+            test_data_iterator = iter(test_dataloader)
         else:
             test_data_iterator = None
 
@@ -357,7 +365,7 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
             from teletron.core.parallel_state import get_transformer_model_group
             isDiTRank = get_transformer_model_group()
             if isDiTRank is not None:
-                _set_random_seed(args.seed, args.data_parallel_random_init)
+                _set_random_seed(args.seed, True)
         args = get_args()
 
         if args.lazy_mpu_init:
@@ -410,12 +418,6 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
 
         if not args.skip_train:
             print_rank_0('training ...')
-
-            if args.dataloader_type == 'cyclic' and args.retro_project_dir:
-                assert args.retro_cyclic_train_iters is not None
-                args.train_iters = args.retro_cyclic_train_iters
-                print_rank_0("retro cyclic train iters : %d" % args.train_iters)
-
             iteration = 0
             if args.do_train and args.train_iters > 0:
                 iteration, num_floating_point_operations_so_far = self.train(
@@ -423,13 +425,14 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                     # forward_step_func,
                     self.model, self.optimizer, self.scheduler,
                     self.train_itrt, self.valid_itrt,
-                    process_non_loss_data_func, self.config)
+                    process_non_loss_data_func, self.config, self.ema_models)
+
 
             print_datetime('after training is done')
 
             if args.save and iteration != 0 and iteration % args.save_interval != 0:
                 self.save_checkpoint(iteration, self.model, self.optimizer, self.scheduler,
-                                num_floating_point_operations_so_far)
+                                num_floating_point_operations_so_far, self.ema_models)
         else:
             print_rank_0('skipping training (--skip-train is on) ...')
             iteration = args.iteration
@@ -447,6 +450,7 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                                     self.test_itrt, self.model,
                                     iteration, process_non_loss_data_func, self.config,
                                     verbose=True, write_to_tensorboard=not args.skip_train)
+        dist.barrier(group=get_world_group())
 
     def train(
         self,
@@ -458,9 +462,11 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
         valid_data_iterator,
         process_non_loss_data_func,
         config,
+        ema_models,
     ):
         args = get_args()
-
+        # model = self.model
+        timers = get_timers()
         for model_module in model:
             model_module.train()
         total_loss_dict = {}
@@ -505,7 +511,7 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
         num_microbatches = get_num_microbatches()
         eval_duration = 0.0
         eval_iterations = 0
-        
+
         if args.consumer_profile:
             prof_save_path = os.path.join(args.profile_path, f"consumer/rank_{dist.get_rank()}.json")
             ensure_directory_exists(prof_save_path)
@@ -540,7 +546,8 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                     "number of microbatches should be increasing due to batch size rampup"
                 self.save_checkpoint_and_time(iteration, model, optimizer,
                                         opt_param_scheduler,
-                                        num_floating_point_operations_so_far)
+                                        num_floating_point_operations_so_far,
+                                        ema_models)
             num_microbatches = get_num_microbatches()
             update_num_microbatches(args.consumed_train_samples, consistency_check=True)
 
@@ -554,8 +561,13 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                         model,
                         optimizer,
                         opt_param_scheduler,
-                        config)
+                        config,
+                        ema_models)
             
+            dit_time = timers.get_elapsed_time('dit-time')
+            get_data_time = timers.get_elapsed_time('get-data-time')
+            dit_time = (dit_time - get_data_time) / num_microbatches
+
             if grad_norm is None:
                 if args.use_zero2:
                     grad_norm = optimizer._global_grad_norm
@@ -584,6 +596,9 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
             if args.log_params_norm:
                 params_norm = calc_params_l2_norm(model)
 
+            # # if iteration % args.log_interval == 0:
+            # #     track_e2e_metrics()
+
             learning_rate = None
             decoupled_learning_rate = None
             for param_group in optimizer.param_groups:
@@ -598,8 +613,15 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                 decoupled_learning_rate,
                 iteration, loss_scale,
                 report_memory_flag, skipped_iter,
-                grad_norm, params_norm, num_zeros_in_grad
+                grad_norm, params_norm, num_zeros_in_grad, dit_time
             )
+
+            # breakpoint()
+            # Autoresume
+            # if args.adlr_autoresume and \
+            # (iteration % args.adlr_autoresume_interval == 0):
+            #     check_adlr_autoresume_termination(iteration, model, optimizer,
+            #                                     opt_param_scheduler)
 
             # Evaluation
             if args.eval_interval and iteration % args.eval_interval == 0 and \
@@ -627,7 +649,8 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                             iteration % args.save_interval == 0:
                 self.save_checkpoint_and_time(iteration, model, optimizer,
                                         opt_param_scheduler,
-                                        num_floating_point_operations_so_far)
+                                        num_floating_point_operations_so_far,
+                                        ema_models)
                 saved_checkpoint = True
 
             # Exiting based on duration
@@ -643,7 +666,8 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                     if not saved_checkpoint:
                         self.save_checkpoint_and_time(iteration, model, optimizer,
                                                 opt_param_scheduler,
-                                                num_floating_point_operations_so_far)
+                                                num_floating_point_operations_so_far,
+                                                ema_models)
                     print_datetime('exiting program after {} minutes'.format(train_time))
                     exit = True
                     break
@@ -653,7 +677,8 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                 if args.save and not saved_checkpoint:
                     self.save_checkpoint_and_time(iteration, model, optimizer,
                                             opt_param_scheduler,
-                                            num_floating_point_operations_so_far)
+                                            num_floating_point_operations_so_far,
+                                            ema_models)
                 torch.distributed.barrier()
                 print_datetime('exiting program at iteration {}'.format(iteration))
                 exit = True
@@ -667,6 +692,16 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
             if args.manual_gc:
                 if args.manual_gc_interval != 0 and iteration % args.manual_gc_interval == 0:
                     gc.collect()
+
+        # track_e2e_metrics()
+
+        # # Flush TensorBoard and WandB writers.
+        # writer = get_tensorboard_writer()
+        # if writer:
+        #     writer.flush()
+        # wandb_writer = get_wandb_writer()
+        # if wandb_writer:
+        #     wandb_writer.finish()
 
         # Close out pre-hooks if using distributed optimizer and overlapped param gather.
         if args.use_distributed_optimizer and args.overlap_param_gather:
@@ -686,6 +721,7 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
         optimizer,
         opt_param_scheduler,
         config,
+        ema_models,
     ):
         """Single training step."""
         args = get_args()
@@ -694,6 +730,12 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
             for model_chunk in model:
                 model_chunk.zero_grad_buffer()
         optimizer.zero_grad()
+
+        timers = get_timers()
+        timers.get_timer('dit-time', barrier_group=get_transformer_model_group())
+        timers.get_timer('get-data-time', barrier_group=get_transformer_model_group())
+
+        timers.start_timer('dit-time')
 
         if args.use_zero2:
             losses_reduced = deepspeed_forward_backward(
@@ -712,9 +754,10 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                 num_microbatches=get_num_microbatches(),
                 seq_length=args.seq_length,
                 micro_batch_size=args.micro_batch_size,
-                decoder_seq_length=args.decoder_seq_length,
                 forward_only=False)
 
+        timers.stop_timer('dit-time')
+        # breakpoint()
         # Empty unused memory.
         if args.empty_unused_memory_level >= 1:
             torch.cuda.empty_cache()
@@ -732,6 +775,12 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
             num_zeros_in_grad = None
         else:
             update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+
+        #ema model step
+        if ema_models is not None:
+            for model, ema_model in zip(model, ema_models):
+                state_dict = model.state_dict()
+                ema_model.step(state_dict)
 
         # Vision momentum.
         if getattr(args, 'vision_pretraining', False) and args.vision_pretraining_type == "dino":
@@ -751,6 +800,7 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
         # Empty unused memory.
         if args.empty_unused_memory_level >= 2:
             torch.cuda.empty_cache()
+        # breakpoint()
 
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             # Average loss across microbatches.
@@ -782,19 +832,28 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
         # Timelimit hit during evaluation
         if timelimit:
             return
-        string = ' validation loss at {} | '.format(prefix)
+        string = ' validation loss at {} | '.format(prefix) + '\n'
         import math
-        for key in total_loss_dict:
-            string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
-            ppl = math.exp(min(20, total_loss_dict[key].item()))
-            string += '{} PPL: {:.6E} | '.format(key, ppl)
+        
+        if self.eval_time_steps:
+            for time_step in total_loss_dict:
+                string += 'time step: {} |'.format(time_step)
+                for key in total_loss_dict[time_step]:
+                    string += '{} value: {:.6E} | '.format(key, total_loss_dict[time_step][key].item())
+                string +='\n'
+        else:
+            for key in total_loss_dict:
+                string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
+                ppl = math.exp(min(20, total_loss_dict[key].item()))
+                string += '{} PPL: {:.6E} | '.format(key, ppl)
+        
 
         length = len(string) + 1
         print_rank_last('-' * length)
         print_rank_last(string)
         print_rank_last('-' * length)
 
-        self.log_validation_infos(total_loss_dict, iteration)
+        self.log_validation_infos(total_loss_dict, iteration, self.eval_time_steps)
 
     def evaluate(
         self,
@@ -807,6 +866,10 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
     ):
         """Evaluation."""
         args = get_args()
+
+        # if args.vision_pretraining and args.vision_pretraining_type == "dino":
+        #     from megatron.legacy.model.vision.knn_monitor import compute_feature_bank
+        #     compute_feature_bank(model)
 
         # Turn on evaluation mode which disables dropout.
         for model_module in model:
@@ -831,15 +894,28 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
                 forward_backward_func = get_forward_backward_func()
                 # Don't care about timing during evaluation
                 config.timers = None
-                loss_dicts = forward_backward_func(
-                    forward_step_func=forward_step_func,
-                    data_iterator=data_iterator,
-                    model=model,
-                    num_microbatches=eval_num_microbatches,
-                    seq_length=args.seq_length,
-                    micro_batch_size=args.micro_batch_size,
-                    decoder_seq_length=args.decoder_seq_length,
-                    forward_only=True)
+                
+                
+                if self.eval_time_steps:
+                    time_steps_loss_dicts = {}
+                    for time_step in self.eval_time_steps:
+                        time_steps_loss_dicts[time_step] = forward_backward_func(
+                            forward_step_func=partial(forward_step_func,time_step=time_step),
+                            data_iterator=data_iterator,
+                            model=model,
+                            num_microbatches=eval_num_microbatches,
+                            seq_length=args.seq_length,
+                            micro_batch_size=args.micro_batch_size,
+                            forward_only=True)
+                else:
+                    loss_dicts = forward_backward_func(
+                        forward_step_func=partial(forward_step_func),
+                        data_iterator=data_iterator,
+                        model=model,
+                        num_microbatches=eval_num_microbatches,
+                        seq_length=args.seq_length,
+                        micro_batch_size=args.micro_batch_size,
+                        forward_only=True)
 
                 # Empty unused memory
                 if args.empty_unused_memory_level >= 1:
@@ -847,10 +923,43 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
 
                 if mpu.is_pipeline_last_stage(ignore_virtual=True):
                     # Reduce across processes.
-                    for loss_dict in loss_dicts:
-                        for key in loss_dict:
-                            total_loss_dict[key] = total_loss_dict.get(
-                                key, torch.tensor([0.0], dtype=torch.float, device='cuda')) + loss_dict[key]
+                    if self.eval_time_steps:
+                        for time_step in time_steps_loss_dicts:
+                            loss_dict_per_time_step={}
+                            for loss_dict in time_steps_loss_dicts[time_step]:
+                                for key in loss_dict:
+                                    loss_dict_per_time_step[key] = loss_dict_per_time_step.get(
+                                        key, torch.tensor([0.0], dtype=torch.float, device='cuda')) + loss_dict[key]
+                                    
+                            current_step_avg_loss = {k: v.clone().detach() / eval_num_microbatches for k, v in loss_dict_per_time_step.items()}
+                            
+                            log_strings = [f'   time_step {time_step}:']
+                            for key, value in current_step_avg_loss.items():
+                                log_strings.append(f'{key} = {value.item():.4f}')
+                            print_rank_last(f'  > eval iteration {iteration} results: ' + ', '.join(log_strings))
+                            total_loss_dict[time_step] = loss_dict_per_time_step
+                            
+                            
+                    else:
+                        current_step_loss = {}
+                        for loss_dict in loss_dicts:
+                            for key in loss_dict:
+                                current_step_loss[key] = current_step_loss.get(
+                                    key, torch.tensor([0.0], dtype=torch.float, device='cuda')) + loss_dict[key]
+                        
+                        # 在每个评估步骤后打印当前步骤的结果
+                            # 为了打印，需要将loss除以micro-batch的数量来得到平均值
+                        current_step_avg_loss = {k: v.clone().detach() / eval_num_microbatches for k, v in current_step_loss.items()}
+
+                        # 将Tensor转换为Python数值以便打印
+                        log_strings = []
+                        for key, value in current_step_avg_loss.items():
+                            log_strings.append(f'{key} = {value.item():.4f}')
+                        print_rank_last(f'  > eval iteration {iteration} results: ' + ', '.join(log_strings))
+                        for loss_dict in loss_dicts:
+                            for key in loss_dict:
+                                total_loss_dict[key] = total_loss_dict.get(
+                                    key, torch.tensor([0.0], dtype=torch.float, device='cuda')) + loss_dict[key]
 
                 args.consumed_valid_samples += eval_batch_size
 
@@ -883,7 +992,12 @@ class Trainer(CheckPointMixin, SchedulerMixin, DataloaderMixin, TeleLoggerMixin)
         for model_module in model:
             model_module.train()
 
-        for key in total_loss_dict:
-            total_loss_dict[key] /= args.eval_iters * eval_num_microbatches
+        if self.eval_time_steps:
+            for time_step in total_loss_dict:
+                for key in total_loss_dict[time_step]:
+                    total_loss_dict[time_step][key] /= args.eval_iters * eval_num_microbatches
+        else :
+            for key in total_loss_dict:
+                total_loss_dict[key] /= args.eval_iters * eval_num_microbatches
 
         return total_loss_dict, collected_non_loss_data, False

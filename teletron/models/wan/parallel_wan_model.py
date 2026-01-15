@@ -7,14 +7,7 @@ import torch.nn as nn
 from teletron.core.context_parallel import ContextParallelMixin
 from teletron.core.transformer import TransformerGeneralMixin
 from .wan_model import WanModel, DiTBlock, sinusoidal_embedding_1d
-
-def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0, device="cuda"):
-    # 1d rope precompute
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device)
-                   [: (dim // 2)].double() / dim))
-    freqs = torch.outer(torch.arange(end, device=freqs.device), freqs)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
+from teletron.utils import set_config
 
 class ContextParallelWanDitBlock(ContextParallelMixin, DiTBlock):
     def __init__(self, *args, **kwargs):
@@ -46,7 +39,8 @@ class ContextParallelWanDitBlock(ContextParallelMixin, DiTBlock):
 
 class ParallelWanModel(ContextParallelMixin, TransformerGeneralMixin, WanModel):
     def __init__(self, config):
-        WanModel.__init__(self, config)
+        dit_model_config = set_config().get('model_config', None).get('dit', None).get('config', None)
+        WanModel.__init__(self, **dit_model_config)
         self.config = config
         
         self.blocks = nn.ModuleList([
@@ -108,11 +102,11 @@ class ParallelWanModel(ContextParallelMixin, TransformerGeneralMixin, WanModel):
         
         x, (f, h, w) = self.patchify(x)
         
-        head_dim = self.dim // self.num_heads
-        freq_f = precompute_freqs_cis(head_dim - 2 * (head_dim // 3), f).view(f, 1, 1, -1).expand(f, h, w, -1)
-        freq_h = precompute_freqs_cis(head_dim // 3, h).view(1, h, 1, -1).expand(f, h, w, -1)
-        freq_w = precompute_freqs_cis(head_dim // 3, w).view(1, 1, w, -1).expand(f, h, w, -1)
-        freqs = torch.cat([freq_f, freq_h, freq_w], dim=-1).reshape(f * h * w, 1, -1).to(x.device)
+        freqs = torch.cat([
+            self.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+            self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+        ], dim=-1).reshape(f * h * w, 1, -1).to(x.device)
 
         # Split input sequence and rope (with methods from CPMixin), and forward CP transformer blocks
         x = self.split_input(x, dim=1)

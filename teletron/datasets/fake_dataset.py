@@ -8,6 +8,8 @@ from teletron.utils import get_args
 class FakeDataset():
     def __init__(
         self,
+        *args,
+        **kwargs
     ) -> None:
         self.args = get_args()
         self.dst_num_frames = self.args.num_frames

@@ -1,16 +1,14 @@
-# Copyright (c) 2025 TeleAI-infra Team. All rights reserved.
 
 import torch
-from datetime import datetime
 from megatron.core import mpu
-
 from teletron.utils import (
     get_args,
     print_rank_last,
     get_num_microbatches
 )
+from datetime import datetime
 from teletron.train.utils import report_memory, report_theoretical_memory
-from teletron.utils.config import get_timers, get_tensorboard_writer, get_wandb_writer
+from teletron.utils.global_vars import get_timers, get_tensorboard_writer, get_wandb_writer
 
 NUM_BYTES_IN_MEGABYTE = 1024 * 1024
 
@@ -30,6 +28,7 @@ class TeleLoggerMixin:
         grad_norm,
         params_norm,
         num_zeros_in_grad,
+        dit_time,
     ):
         """Log training information such as losses, timing, ...."""
         args = get_args()
@@ -201,6 +200,7 @@ class TeleLoggerMixin:
                 iteration, args.train_iters)
             log_string += ' consumed samples: {:12d} |'.format(
                 args.consumed_train_samples)
+            log_string += ' dit_time (ms): {:.2f} |'.format(dit_time * 1000)
             # log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
             #     elapsed_time_per_iteration * 1000.0)
             # if args.log_throughput:
@@ -253,11 +253,19 @@ class TeleLoggerMixin:
 
         return report_memory_flag
 
-    def log_validation_infos(self, loss_dict, iteration):
+    def log_validation_infos(self, loss_dict, iteration, eval_time_steps=None):
         args = get_args()
         writer = get_tensorboard_writer()
         if writer:
-            for key in loss_dict:
-                writer.add_scalar(f"validation: {key}" , loss_dict[key], iteration)
-                writer.add_scalar(f"validation: {key}" + ' vs samples', loss_dict[key],
-                                  args.consumed_train_samples)
+            if eval_time_steps:
+                for time_step in loss_dict:
+                    # writer.add_scalar(f"time step: {time_step}")
+                    for key in loss_dict[time_step]:
+                        writer.add_scalar(f"validation/time step: {time_step} {key}" , loss_dict[time_step][key], iteration)
+                        writer.add_scalar(f"validation vs samples/time step: {time_step} {key}" + ' ', loss_dict[time_step][key],
+                                    args.consumed_train_samples)
+            else:
+                for key in loss_dict:
+                    writer.add_scalar(f"validation: {key}" , loss_dict[key], iteration)
+                    writer.add_scalar(f"validation: {key}" + ' vs samples', loss_dict[key],
+                                    args.consumed_train_samples)

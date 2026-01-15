@@ -880,25 +880,3 @@ class WanImageEncoder(torch.nn.Module):
         videos = videos.to(dtype)
         out = self.model.visual(videos, use_31_block=True)
         return out
-        
-    @staticmethod
-    def state_dict_converter():
-        return WanImageEncoderStateDictConverter()
-    
-    
-class WanImageEncoderStateDictConverter:
-    def __init__(self):
-        pass
-
-    def from_diffusers(self, state_dict):
-        return state_dict
-    
-    def from_civitai(self, state_dict):
-        state_dict_ = {}
-        for name, param in state_dict.items():
-            if name.startswith("textual."):
-                continue
-            name = "model." + name
-            state_dict_[name] = param
-        return state_dict_
-

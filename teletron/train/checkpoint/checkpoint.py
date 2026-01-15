@@ -1,5 +1,3 @@
-# Copyright (c) 2025 TeleAI-infra Team, DeepSpeed Team and Nvidia Megatron-LM Team. All rights reserved.
-
 import os
 import sys
 import random
@@ -8,7 +6,6 @@ import numpy as np
 from megatron.core.transformer.module import Float16Module
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core import mpu, tensor_parallel, dist_checkpointing
-
 from teletron.utils import (
     print_rank_0,
     get_args,
@@ -46,12 +43,12 @@ def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
 class CheckPointMixin:
 
     def save_checkpoint_and_time(self, iteration, model, optimizer, opt_param_scheduler,
-                             num_floating_point_operations_so_far):
+                             num_floating_point_operations_so_far, ema_models):
         self.save_checkpoint(iteration, model, optimizer, opt_param_scheduler,
-                        num_floating_point_operations_so_far)
+                        num_floating_point_operations_so_far, ema_models)
 
     def save_checkpoint(self, iteration, model, optimizer, opt_param_scheduler,
-                num_floating_point_operations_so_far):
+                num_floating_point_operations_so_far, ema_models):
         """Save a model checkpoint."""
         args = get_args()
 
@@ -67,6 +64,20 @@ class CheckPointMixin:
 
         # Checkpoint name.
         checkpoint_name = get_checkpoint_name(args.save, iteration, return_base_dir=args.use_dist_ckpt)
+        
+        #save ema model
+        if ema_models is not None:
+            ema_config_list = []
+            ema_state_dict_list = []
+            for ema_model in ema_models:
+                ema_state_dict_list.append(ema_model.state_dict())
+                ema_config_list.append(ema_model.config)
+            if not torch.distributed.is_initialized() or mpu.get_data_parallel_rank(with_context_parallel=True) == 0:
+                ema_checkpoint_name  = get_checkpoint_name(args.save, iteration, return_base_dir=args.use_dist_ckpt, ema=True)
+                ema_config_name  = get_checkpoint_name(args.save, iteration, return_base_dir=args.use_dist_ckpt, ema_config=True)
+                ensure_directory_exists(ema_checkpoint_name)
+                torch.save(ema_state_dict_list, ema_checkpoint_name)
+                torch.save(ema_config_list, ema_config_name)
 
         # Save distributed optimizer's custom parameter state.
         if args.use_distributed_optimizer and not args.no_save_optim and optimizer is not None and not args.use_dist_ckpt:
@@ -128,7 +139,7 @@ class CheckPointMixin:
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
-    def load_checkpoint(self, model, optimizer, opt_param_scheduler, load_arg='load', strict=True):
+    def load_checkpoint(self, model, optimizer, opt_param_scheduler, load_arg='load', strict=True, ema_models=None):
         """Load a model checkpoint and return the iteration.
         strict (bool): whether to strictly enforce that the keys in
             :attr:`state_dict` of the checkpoint match the names of
@@ -183,10 +194,22 @@ class CheckPointMixin:
         else:
             state_dict, checkpoint_name, release = _load_base_checkpoint(load_dir, rank0=False, **load_kwargs)
 
+        #load ema model
+        if ema_models is not None:
+            tracker_filename = get_checkpoint_tracker_filename(load_dir)
+            iteration, release = read_metadata(tracker_filename)
+            ema_checkpoint_name  = get_checkpoint_name(load_dir, iteration, return_base_dir=False, ema=True)
+            ema_config_name  = get_checkpoint_name(load_dir, iteration, return_base_dir=False, ema_config=True)
+            ema_models_state_dict = torch.load(ema_checkpoint_name, map_location='cpu', weights_only=False)
+            ema_config_state_dict = torch.load(ema_config_name, map_location='cpu', weights_only=False)
+            for ema_model, ema_state_dict, ema_config in zip(ema_models, ema_models_state_dict, ema_config_state_dict):
+                ema_model.load_state_dict(ema_state_dict, device=torch.cuda.current_device(), dtype=torch.float32)
+                ema_model.load_config(ema_config)
+        
         # Checkpoint not loaded.
         if state_dict is None:
             # Iteration and num_floating_point_operations_so_far default to 0.
-            return 0, 0
+            return 0, 0, optimizer, opt_param_scheduler
 
         # Set checkpoint version.
         # set_checkpoint_version(state_dict.get('checkpoint_version', 0))
@@ -209,7 +232,7 @@ class CheckPointMixin:
         # Check arguments.
         assert args.consumed_train_samples == 0
         assert args.consumed_valid_samples == 0
-        if 'args' in state_dict and not args.finetune:
+        if 'args' in state_dict and not args.finetune and not release:
             checkpoint_args = state_dict['args']
             # check_checkpoint_args(checkpoint_args)
             args.consumed_train_samples = getattr(checkpoint_args,
@@ -296,7 +319,11 @@ class CheckPointMixin:
                     if 'lr_scheduler' in state_dict: # backward compatbility
                         opt_param_scheduler.load_state_dict(state_dict['lr_scheduler'])
                     else:
-                        opt_param_scheduler.load_state_dict(state_dict['opt_param_scheduler'])
+                        scheduler_dict = state_dict['opt_param_scheduler']
+                        # num_steps = num_steps / ori_rank * new_rank
+                        num_steps = scheduler_dict['num_steps'] / state_dict['args'].dit_world_size * args.dit_world_size
+                        scheduler_dict['num_steps'] = num_steps
+                        opt_param_scheduler.load_state_dict(scheduler_dict)
             except KeyError:
                 print_rank_0('Unable to load optimizer from checkpoint {}. '
                             'Specify --no-load-optim or --finetune to prevent '
@@ -358,7 +385,7 @@ class CheckPointMixin:
                     f'p {mpu.get_pipeline_model_parallel_rank()} ] '
                     f'at iteration {iteration}')
 
-        return iteration, num_floating_point_operations_so_far
+        return iteration, num_floating_point_operations_so_far, optimizer, opt_param_scheduler
 
     @staticmethod
     def generate_state_dict(args, model, optimizer, opt_param_scheduler,

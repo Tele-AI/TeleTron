@@ -707,22 +707,19 @@ class WanVideoVAE(nn.Module):
                 h_, w_ = h + size_h, w + size_w
                 tasks.append((h, h_, w, w_))
 
-        data_device = "cpu"
-        computation_device = device
-
         out_T = (T + 3) // 4
-        weight = torch.zeros((1, 1, out_T, H // self.upsampling_factor, W // self.upsampling_factor), dtype=video.dtype, device=data_device)
-        values = torch.zeros((1, 16, out_T, H // self.upsampling_factor, W // self.upsampling_factor), dtype=video.dtype, device=data_device)
+        weight = torch.zeros((1, 1, out_T, H // self.upsampling_factor, W // self.upsampling_factor), dtype=video.dtype, device=device)
+        values = torch.zeros((1, 16, out_T, H // self.upsampling_factor, W // self.upsampling_factor), dtype=video.dtype, device=device)
 
         for h, h_, w, w_ in tasks:
-            hidden_states_batch = video[:, :, :, h:h_, w:w_].to(computation_device)
-            hidden_states_batch = self.model.encode(hidden_states_batch, self.scale).to(data_device)
+            hidden_states_batch = video[:, :, :, h:h_, w:w_].to(device)
+            hidden_states_batch = self.model.encode(hidden_states_batch, self.scale).to(device)
 
             mask = self.build_mask(
                 hidden_states_batch,
                 is_bound=(h==0, h_>=H, w==0, w_>=W),
                 border_width=((size_h - stride_h) // self.upsampling_factor, (size_w - stride_w) // self.upsampling_factor)
-            ).to(dtype=video.dtype, device=data_device)
+            ).to(dtype=video.dtype, device=device)
 
             target_h = h // self.upsampling_factor
             target_w = w // self.upsampling_factor
@@ -758,7 +755,6 @@ class WanVideoVAE(nn.Module):
 
     def encode(self, videos, device, tiled=False, tile_size=(34, 34), tile_stride=(18, 16)):
 
-        videos = [video.to("cpu") for video in videos]
         hidden_states = []
         for video in videos:
             video = video.unsqueeze(0)
@@ -787,22 +783,3 @@ class WanVideoVAE(nn.Module):
             videos.append(video)
         videos = torch.stack(videos)
         return videos
-
-
-    @staticmethod
-    def state_dict_converter():
-        return WanVideoVAEStateDictConverter()
-
-
-class WanVideoVAEStateDictConverter:
-
-    def __init__(self):
-        pass
-
-    def from_civitai(self, state_dict):
-        state_dict_ = {}
-        if 'model_state' in state_dict:
-            state_dict = state_dict['model_state']
-        for name in state_dict:
-            state_dict_['model.' + name] = state_dict[name]
-        return state_dict_

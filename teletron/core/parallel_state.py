@@ -1,4 +1,4 @@
-# Copyright (c) 2025 TeleAI-infra Team and Nvidia Megatron-LM Team. All rights reserved.
+# Copyright (c) 2025 TeleAI-infra and Nvidia Megatron-LM Team. All rights reserved.
 
 from functools import wraps
 
@@ -8,6 +8,8 @@ import megatron.core.parallel_state as ps
 
 from typing import Optional
 from datetime import timedelta
+from functools import reduce
+import operator
 import os
 
 _TENSOR_CONTEXT_PARALLEL_GROUP = None
@@ -179,6 +181,7 @@ def initialize_model_parallel_decorators(initialize_model_parallel):
             models_num = margs.consumer_models_num
             model_world_size = (total_world_size - extra_model_parallel_world_size)
         else: 
+            models_num=1
             model_world_size = torch.distributed.get_world_size()
     
 
@@ -211,19 +214,6 @@ def initialize_model_parallel_decorators(initialize_model_parallel):
         tensor_and_context_group_size: int = tensor_model_parallel_size * context_parallel_size
         num_tensor_and_context_groups: int = per_model_world_size  // tensor_and_context_group_size
 
-        for k in range(models_num):
-            this_start_rank = k* per_model_world_size
-            for i in range(num_tensor_and_context_groups):
-                start_rank  = i * tensor_and_context_group_size + this_start_rank
-                ranks = (start_rank, local_rank)
-                group = torch.distributed.new_group(
-                    ranks
-                )
-                if local_rank in ranks:
-                    if get_transformer_model_group() is not None:
-                        _DATA_TRANSMIT_GROUP = group 
-                    else:
-                        _DATA_TRANSMIT_GROUP.append(group)
 
         if get_transformer_model_group() is not None:
             print("**********start init MP**********************************")
@@ -270,7 +260,7 @@ def initialize_comm_pair( tensor_model_parallel_size, pipeline_model_parallel_si
     
     tensor_and_context_group_size: int = tensor_model_parallel_size * context_parallel_size
     num_tensor_and_context_groups: int = pp_size // tensor_and_context_group_size
-
+    assert num_tensor_and_context_groups % producer_size == 0 and num_tensor_and_context_groups//producer_size >=1
     if get_transformer_model_group() is not None:
         # consumer ranks
         for i in range(num_tensor_and_context_groups):
